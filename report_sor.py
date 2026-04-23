@@ -22,6 +22,7 @@ from sor_reader324802a import parse_sor_full
 from report import (  # reuse helpers — all neutral
     _BASE_CSS, _embed_logo, _find_chrome, _outlier_probability,
     html_to_pdf_bytes, _fmt_time_gap,
+    _COLOR_HIGH, _COLOR_MID, _COLOR_LOW,
 )
 
 _IOR = 1.4682
@@ -89,13 +90,25 @@ def _distribution_chart(scores, p_dup, stats):
     ax1.legend(loc='upper right', fontsize=9)
     ax1.grid(alpha=0.3)
 
-    ax2.scatter(log_s, p_dup, s=45, alpha=0.6, color='#555',
-                edgecolor='white', linewidth=0.5)
-    high = p_dup > 0.1
-    ax2.scatter(log_s[high], p_dup[high], s=120, alpha=0.95,
-                color='#2d8f48', edgecolor='black', linewidth=1, zorder=5,
-                label=f'Likelihood > 10% (n={int(high.sum())})')
-    ax2.axhline(0.5, color='#b97000', linestyle='--', alpha=0.5, linewidth=1)
+    # Tier masks: high ≥ 0.9, mid 0.5–0.9, low ≤ 0.5. Colors match the tables.
+    p = np.asarray(p_dup)
+    m_hi = p > 0.9
+    m_md = (p > 0.5) & (~m_hi)
+    m_lo = ~(m_hi | m_md)
+    if m_lo.any():
+        ax2.scatter(log_s[m_lo], p[m_lo], s=45, alpha=0.6, color=_COLOR_LOW,
+                    edgecolor='white', linewidth=0.5,
+                    label=f'Non-duplicate (n={int(m_lo.sum())})')
+    if m_md.any():
+        ax2.scatter(log_s[m_md], p[m_md], s=120, alpha=0.95,
+                    color=_COLOR_MID, edgecolor='black', linewidth=1, zorder=4,
+                    label=f'Borderline 50–90% (n={int(m_md.sum())})')
+    if m_hi.any():
+        ax2.scatter(log_s[m_hi], p[m_hi], s=140, alpha=0.95,
+                    color=_COLOR_HIGH, edgecolor='black', linewidth=1, zorder=5,
+                    label=f'Duplicate ≥90% (n={int(m_hi.sum())})')
+    ax2.axhline(0.9, color=_COLOR_HIGH, linestyle=':', alpha=0.4, linewidth=1)
+    ax2.axhline(0.5, color=_COLOR_MID, linestyle='--', alpha=0.5, linewidth=1)
     ax2.set_xticklabels([])
     ax2.set_xlabel('match score (log scale)')
     ax2.set_ylabel('duplicate likelihood')

@@ -171,8 +171,34 @@ h2 { font-size:14px; font-weight:500; margin:24px 0 8px; page-break-after:avoid;
 """
 
 
+_COLOR_HIGH = '#2d8f48'   # p_dup > 0.9  — solid duplicate (green)
+_COLOR_MID  = '#b97000'   # 0.5 < p_dup ≤ 0.9  — borderline (orange)
+_COLOR_LOW  = '#888'      # p_dup ≤ 0.5  — non-duplicate (grey)
+
+
+def _tier(p):
+    """Return 'high' / 'mid' / 'low' based on p_dup (or is_dup = high)."""
+    if p.get('is_dup') or p.get('p_dup', 0) > 0.9:
+        return 'high'
+    if p.get('p_dup', 0) > 0.5:
+        return 'mid'
+    return 'low'
+
+
 def _is_highlighted(p):
-    return bool(p.get('is_dup') or p.get('p_dup', 0) > 0.5)
+    return _tier(p) != 'low'
+
+
+def _tier_split(all_pairs_list, key_fn):
+    """Split pair values into (high, mid, low) lists using key_fn(pair)->value|None."""
+    hi, md, lo = [], [], []
+    for p in all_pairs_list:
+        v = key_fn(p)
+        if v is None:
+            continue
+        t = _tier(p)
+        (hi if t == 'high' else md if t == 'mid' else lo).append(v)
+    return hi, md, lo
 
 
 def chart_distribution(all_pairs_list):
@@ -180,30 +206,33 @@ def chart_distribution(all_pairs_list):
     fig, axes = plt.subplots(4, 1, figsize=(13, 9), sharex=False)
     panels = [(1310, axes[0]), (1550, axes[1]), (1625, axes[2])]
     for wl, ax in panels:
-        dup_v = [p['score'][wl] for p in all_pairs_list
-                 if _is_highlighted(p) and p['score'][wl] is not None]
-        non_v = [p['score'][wl] for p in all_pairs_list
-                 if not _is_highlighted(p) and p['score'][wl] is not None]
-        if dup_v and non_v:
-            dup_max = max(dup_v); non_min = min(non_v)
+        hi, md, lo = _tier_split(all_pairs_list, lambda p: p['score'].get(wl))
+        dup_v = hi + md  # combined "highlighted" for separation-band math
+        if dup_v and lo:
+            dup_max = max(dup_v); non_min = min(lo)
             if non_min > dup_max:
-                ax.axvspan(dup_max, non_min, color='#2d8f48', alpha=0.15,
+                ax.axvspan(dup_max, non_min, color=_COLOR_HIGH, alpha=0.15,
                            label=f'separation band ({non_min/dup_max:.2f}×)')
             ax.set_title(f'{wl} nm — duplicates separate {non_min/dup_max:.1f}× below non-duplicates',
                          fontweight='bold', loc='left')
         else:
             ax.set_title(f'{wl} nm — match-score distribution', fontweight='bold', loc='left')
-        ax.scatter(non_v, rng.uniform(0.25, 0.55, len(non_v)),
-                   color='#888', alpha=0.55, s=55, edgecolor='white', linewidth=0.4,
-                   label=f'Non-duplicate (n={len(non_v)})')
-        if dup_v:
-            ax.scatter(dup_v, rng.uniform(0.55, 0.85, len(dup_v)),
-                       color='#2d8f48', alpha=0.95, s=170, edgecolor='black', linewidth=1,
-                       zorder=5, label=f'Duplicate (n={len(dup_v)})')
-        ax.axvline(_SCORE_GATE, color='#b97000', linestyle='--', linewidth=1.3,
+        if lo:
+            ax.scatter(lo, rng.uniform(0.25, 0.55, len(lo)),
+                       color=_COLOR_LOW, alpha=0.55, s=55, edgecolor='white', linewidth=0.4,
+                       label=f'Non-duplicate (n={len(lo)})')
+        if md:
+            ax.scatter(md, rng.uniform(0.55, 0.70, len(md)),
+                       color=_COLOR_MID, alpha=0.95, s=140, edgecolor='black', linewidth=1,
+                       zorder=4, label=f'Borderline 50–90% (n={len(md)})')
+        if hi:
+            ax.scatter(hi, rng.uniform(0.70, 0.85, len(hi)),
+                       color=_COLOR_HIGH, alpha=0.95, s=170, edgecolor='black', linewidth=1,
+                       zorder=5, label=f'Duplicate ≥90% (n={len(hi)})')
+        ax.axvline(_SCORE_GATE, color=_COLOR_MID, linestyle='--', linewidth=1.3,
                    label='decision threshold')
         ax.set_xscale('log')
-        all_v = (dup_v or []) + (non_v or [])
+        all_v = hi + md + lo
         if all_v:
             ax.set_xlim(min(all_v) * 0.7, max(all_v) * 1.3)
         ax.set_ylim(0, 1)
@@ -214,22 +243,27 @@ def chart_distribution(all_pairs_list):
         ax.legend(loc='upper right', fontsize=8, ncol=2)
 
     ax = axes[3]
-    dup_sum = [sum(p['score'].values()) for p in all_pairs_list if _is_highlighted(p)]
-    non_sum = [sum(p['score'].values()) for p in all_pairs_list if not _is_highlighted(p)]
-    if dup_sum and non_sum:
-        d_max = max(dup_sum); n_min = min(non_sum)
+    hi, md, lo = _tier_split(all_pairs_list, lambda p: sum(p['score'].values()))
+    dup_sum = hi + md
+    if dup_sum and lo:
+        d_max = max(dup_sum); n_min = min(lo)
         if n_min > d_max:
-            ax.axvspan(d_max, n_min, color='#2d8f48', alpha=0.15,
+            ax.axvspan(d_max, n_min, color=_COLOR_HIGH, alpha=0.15,
                        label=f'separation band ({n_min/d_max:.2f}×)')
-    ax.scatter(non_sum, rng.uniform(0.25, 0.55, len(non_sum)),
-               color='#888', alpha=0.55, s=55, edgecolor='white', linewidth=0.4,
-               label=f'Non-duplicate (n={len(non_sum)})')
-    if dup_sum:
-        ax.scatter(dup_sum, rng.uniform(0.55, 0.85, len(dup_sum)),
-                   color='#2d8f48', alpha=0.95, s=170, edgecolor='black', linewidth=1,
-                   zorder=5, label=f'Duplicate (n={len(dup_sum)})')
+    if lo:
+        ax.scatter(lo, rng.uniform(0.25, 0.55, len(lo)),
+                   color=_COLOR_LOW, alpha=0.55, s=55, edgecolor='white', linewidth=0.4,
+                   label=f'Non-duplicate (n={len(lo)})')
+    if md:
+        ax.scatter(md, rng.uniform(0.55, 0.70, len(md)),
+                   color=_COLOR_MID, alpha=0.95, s=140, edgecolor='black', linewidth=1,
+                   zorder=4, label=f'Borderline 50–90% (n={len(md)})')
+    if hi:
+        ax.scatter(hi, rng.uniform(0.70, 0.85, len(hi)),
+                   color=_COLOR_HIGH, alpha=0.95, s=170, edgecolor='black', linewidth=1,
+                   zorder=5, label=f'Duplicate ≥90% (n={len(hi)})')
     ax.set_xscale('log')
-    all_sum = dup_sum + non_sum
+    all_sum = hi + md + lo
     if all_sum:
         ax.set_xlim(min(all_sum) * 0.7, max(all_sum) * 1.3)
     ax.set_ylim(0, 1)
@@ -251,27 +285,35 @@ def chart_distribution(all_pairs_list):
 
 
 def chart_histogram(all_pairs_list):
-    dup_sum = [sum(p['score'].values()) for p in all_pairs_list if _is_highlighted(p)]
-    non_sum = [sum(p['score'].values()) for p in all_pairs_list if not _is_highlighted(p)]
-    all_sum = dup_sum + non_sum
+    hi, md, lo = _tier_split(all_pairs_list, lambda p: sum(p['score'].values()))
+    dup_sum = hi + md
+    all_sum = hi + md + lo
     fig, ax = plt.subplots(figsize=(13, 4.5))
     if not all_sum:
         return None
     bins = np.linspace(0, max(all_sum) * 1.05, 60)
-    if non_sum:
-        ax.hist(non_sum, bins=bins, color='#888', alpha=0.75,
-                label=f'Non-duplicate (n={len(non_sum)})')
-    counts, _ = np.histogram(non_sum or [0], bins=bins)
+    if lo:
+        ax.hist(lo, bins=bins, color=_COLOR_LOW, alpha=0.75,
+                label=f'Non-duplicate (n={len(lo)})')
+    counts, _ = np.histogram(lo or [0], bins=bins)
     y_mark = max(counts) * 0.75 if len(counts) else 1
-    for d in dup_sum:
-        ax.axvline(d, color='#2d8f48', linewidth=2, alpha=0.9)
-    if dup_sum:
-        ax.scatter(dup_sum, [y_mark]*len(dup_sum), color='#2d8f48', s=200, zorder=5,
-                   edgecolor='black', linewidth=1.2, label=f'Duplicate (n={len(dup_sum)})')
-        if non_sum and min(non_sum) > max(dup_sum):
-            ax.axvspan(max(dup_sum), min(non_sum), color='#2d8f48', alpha=0.12,
-                       label='separation band')
-    ax.axvline(_SCORE_GATE * 3, color='#b97000', linestyle='--', linewidth=1.3,
+    # Draw vertical lines and markers per tier so the color matches the table
+    for d in md:
+        ax.axvline(d, color=_COLOR_MID, linewidth=2, alpha=0.9)
+    for d in hi:
+        ax.axvline(d, color=_COLOR_HIGH, linewidth=2, alpha=0.9)
+    if md:
+        ax.scatter(md, [y_mark]*len(md), color=_COLOR_MID, s=160, zorder=4,
+                   edgecolor='black', linewidth=1.0,
+                   label=f'Borderline 50–90% (n={len(md)})')
+    if hi:
+        ax.scatter(hi, [y_mark]*len(hi), color=_COLOR_HIGH, s=200, zorder=5,
+                   edgecolor='black', linewidth=1.2,
+                   label=f'Duplicate ≥90% (n={len(hi)})')
+    if dup_sum and lo and min(lo) > max(dup_sum):
+        ax.axvspan(max(dup_sum), min(lo), color=_COLOR_HIGH, alpha=0.12,
+                   label='separation band')
+    ax.axvline(_SCORE_GATE * 3, color=_COLOR_MID, linestyle='--', linewidth=1.3,
                label='decision threshold')
     ax.set_xticklabels([])
     ax.set_xlabel('combined match score across 3 wavelengths')
