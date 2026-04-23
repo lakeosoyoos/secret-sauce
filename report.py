@@ -31,6 +31,34 @@ def _decode(pts_b64, n):
     return 64.0 - s / 1024.0
 
 
+def _fmt_time_gap(sec):
+    """Render an integer seconds count as a compact human string."""
+    if sec is None:
+        return '—'
+    sec = int(sec)
+    if sec < 60:
+        return f'{sec}s'
+    if sec < 3600:
+        return f'{sec//60}m {sec%60:02d}s'
+    if sec < 86400:
+        h, r = divmod(sec, 3600)
+        return f'{h}h {r//60:02d}m'
+    d, r = divmod(sec, 86400)
+    return f'{d}d {r//3600:02d}h'
+
+
+def _parse_iso_ts(s):
+    """Return (raw_string, epoch_seconds_or_None). Handles ISO-8601 w/ 'Z'."""
+    if not s:
+        return '', None
+    try:
+        from datetime import datetime as _dt
+        s2 = s.replace('Z', '+00:00')
+        return s, _dt.fromisoformat(s2).timestamp()
+    except Exception:
+        return s, None
+
+
 def load_file(path):
     with open(path) as f:
         d = json.load(f)
@@ -44,9 +72,22 @@ def load_file(path):
         fp = float(dp['FirstPointPosition'].replace(',', ''))
         trace = _decode(dp['Points'], n)
         pos = np.arange(n) * res + fp
-        per_wl[wl] = {'trace': trace, 'pos': pos}
+        results = meas.get('Results') or {}
+        def _num(k):
+            v = results.get(k)
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+        per_wl[wl] = {
+            'trace': trace, 'pos': pos,
+            'max_splice_dB': _num('MaximumSpliceLoss'),
+            'span_loss_dB':  _num('AveragedLoss'),
+            'length_m':      _num('Length'),
+        }
+    dt_raw, dt_epoch = _parse_iso_ts(d.get('TestDateTime', ''))
     return {'name': name, 'filepath': path,
-            'test_dt': d.get('TestDateTime', ''), 'wl': per_wl}
+            'test_dt': dt_raw, 'test_epoch': dt_epoch, 'wl': per_wl}
 
 
 def _outlier_probability(values):
@@ -312,6 +353,57 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
                       f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td>'
                       f'{verdict_html}</tr>')
 
+    # ---- Confirmed-duplicate detail table (pairs with P(dup) > 0.5) -----
+    file_by_name = {f['name']: f for f in files}
+    dup_pairs_sorted = sorted(
+        [p for p in all_pairs_list if p['p_dup'] > 0.5],
+        key=lambda q: -q['p_dup'])
+    dup_detail_rows = ''
+    for p in dup_pairs_sorted:
+        fa = file_by_name.get(p['a']); fb = file_by_name.get(p['b'])
+        if fa is None or fb is None:
+            continue
+        # Time gap (file-level, not per-λ: one timestamp per acquisition)
+        if fa.get('test_epoch') and fb.get('test_epoch'):
+            gap_sec = int(abs(fa['test_epoch'] - fb['test_epoch']))
+            gap_str = _fmt_time_gap(gap_sec)
+        else:
+            gap_str = '—'
+        # Per-wavelength cells: max splice-loss Δ (mdB) + span-loss Δ (mdB)
+        ms_cells = ''
+        sl_cells = ''
+        for wl in WL_ORDER:
+            a_ms = fa['wl'].get(wl, {}).get('max_splice_dB')
+            b_ms = fb['wl'].get(wl, {}).get('max_splice_dB')
+            a_sl = fa['wl'].get(wl, {}).get('span_loss_dB')
+            b_sl = fb['wl'].get(wl, {}).get('span_loss_dB')
+            if a_ms is not None and b_ms is not None:
+                ms_cells += f'<td class="center">{abs(a_ms - b_ms)*1000:.0f}</td>'
+            else:
+                ms_cells += '<td class="center na">—</td>'
+            if a_sl is not None and b_sl is not None:
+                sl_cells += f'<td class="center">{abs(a_sl - b_sl)*1000:.0f}</td>'
+            else:
+                sl_cells += '<td class="center na">—</td>'
+        pd_val = p['p_dup']
+        pd_color = '#2d8f48' if pd_val > 0.9 else '#b97000'
+        dup_detail_rows += (f'<tr><td class="pair-cell">{p["a"]} ↔ {p["b"]}</td>'
+                            f'<td class="center">{gap_str}</td>'
+                            f'{ms_cells}{sl_cells}'
+                            f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td></tr>')
+    dup_detail_block = ''
+    if dup_detail_rows:
+        ms_hdrs = ''.join(f'<th>max splice Δ @ {wl} (mdB)</th>' for wl in WL_ORDER)
+        sl_hdrs = ''.join(f'<th>span loss Δ @ {wl} (mdB)</th>' for wl in WL_ORDER)
+        dup_detail_block = f'''
+<div class="dir-banner">Confirmed duplicate pairs (≥50% likelihood) — detail</div>
+<table class="vote-table">
+<tr><th style="text-align:left">Pair</th><th>Time gap</th>
+  {ms_hdrs}{sl_hdrs}<th>Duplicate likelihood</th></tr>
+{dup_detail_rows}
+</table>
+'''
+
     nonconf_sorted = sorted(
         [p for p in all_pairs_list if tuple(sorted([p['a'], p['b']])) not in truth_dups],
         key=lambda q: q['sum_score'])
@@ -392,6 +484,8 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
   <th>combined score</th><th>Duplicate likelihood</th><th>Verdict</th></tr>
 {file_rows}
 </table>
+
+{dup_detail_block}
 
 <div class="dir-banner">Closest non-duplicate pairs</div>
 <table class="vote-table">

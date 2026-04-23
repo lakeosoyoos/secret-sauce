@@ -21,7 +21,7 @@ from sor_reader324802a import parse_sor_full
 
 from report import (  # reuse helpers — all neutral
     _BASE_CSS, _embed_logo, _find_chrome, _outlier_probability,
-    html_to_pdf_bytes,
+    html_to_pdf_bytes, _fmt_time_gap,
 )
 
 _IOR = 1.4682
@@ -40,6 +40,13 @@ def load_sor_file(path):
     dz_m = 2.998e8 * sp / (2.0 * _IOR)
     pos = np.arange(len(trace)) * dz_m
     length_m = r.get('exfo_spans_length') or (pos[-1] if len(pos) else 0.0)
+    events = r.get('events') or []
+    # Max splice loss from event table (firmware-reported, interior events only)
+    splice_vals = [e.get('splice_loss') for e in events
+                   if e.get('splice_loss') is not None
+                   and not e.get('is_end')
+                   and (e.get('dist_km') or 0) > 0.01]
+    max_splice = max((abs(v) for v in splice_vals), default=None) if splice_vals else None
     return {
         'name':     os.path.splitext(os.path.basename(path))[0],
         'filepath': path,
@@ -47,8 +54,10 @@ def load_sor_file(path):
         'pos':      pos,
         'length':   float(length_m),
         'loss':     r.get('exfo_spans_loss'),
+        'max_splice_dB': max_splice,
+        'timestamp': r.get('date_time'),
         'wavelength': r.get('exfo_wavelength_nm') or r.get('wavelength'),
-        'events':   r.get('events') or [],
+        'events':   events,
     }
 
 
@@ -191,6 +200,44 @@ def build_report_sor(folder, title, out_pdf):
                      f'<td class="center">{p["score"]:.4f}</td>'
                      f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td></tr>')
 
+    # Confirmed-duplicate detail table (p_dup > 0.5)
+    file_by_name = {f['name']: f for f in files}
+    dup_pairs_sorted = sorted([p for p in pairs if p['p_dup'] > 0.5],
+                              key=lambda q: -q['p_dup'])
+    dup_detail_rows = ''
+    for p in dup_pairs_sorted:
+        fa = file_by_name.get(p['a']); fb = file_by_name.get(p['b'])
+        if fa is None or fb is None:
+            continue
+        ta, tb = fa.get('timestamp'), fb.get('timestamp')
+        gap_str = _fmt_time_gap(abs(ta - tb)) if ta and tb else '—'
+        a_ms, b_ms = fa.get('max_splice_dB'), fb.get('max_splice_dB')
+        a_sl, b_sl = fa.get('loss'), fb.get('loss')
+        ms_cell = (f'<td class="center">{abs(a_ms - b_ms)*1000:.0f}</td>'
+                   if a_ms is not None and b_ms is not None
+                   else '<td class="center na">—</td>')
+        sl_cell = (f'<td class="center">{abs(a_sl - b_sl)*1000:.0f}</td>'
+                   if a_sl is not None and b_sl is not None
+                   else '<td class="center na">—</td>')
+        pd_val = p['p_dup']
+        pd_color = '#2d8f48' if pd_val > 0.9 else '#b97000'
+        dup_detail_rows += (f'<tr><td class="pair-cell">{p["a"]} ↔ {p["b"]}</td>'
+                            f'<td class="center">{gap_str}</td>'
+                            f'{ms_cell}{sl_cell}'
+                            f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td></tr>')
+    dup_detail_block = ''
+    if dup_detail_rows:
+        wl_hdr = f'{int(files[0].get("wavelength") or 0)} nm' if files else ''
+        dup_detail_block = f'''
+<div class="dir-banner">Confirmed duplicate pairs (≥50% likelihood) — detail ({wl_hdr})</div>
+<table class="vote-table">
+<tr><th style="text-align:left">Pair</th><th>Time gap</th>
+  <th>max splice Δ (mdB)</th><th>span loss Δ (mdB)</th>
+  <th>Duplicate likelihood</th></tr>
+{dup_detail_rows}
+</table>
+'''
+
     generated = datetime.now().strftime('%Y-%m-%d %H:%M')
     html = f'''<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -230,6 +277,7 @@ def build_report_sor(folder, title, out_pdf):
     <th>match score</th><th>Duplicate likelihood</th></tr>
 {top_rows}
 </table>
+{dup_detail_block}
 </body></html>'''
 
     pdf_bytes = html_to_pdf_bytes(html, base_url=folder)
