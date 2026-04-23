@@ -58,11 +58,25 @@ st.caption(
 )
 
 # ----- upload -----------------------------------------------------------
-uploads = st.file_uploader(
-    "Drop .sor, .json files and/or a .zip here",
-    type=["sor", "json", "zip"],
-    accept_multiple_files=True,
-)
+# file_uploader keeps its own state; bumping a key counter is how Streamlit
+# apps "clear" it — the widget re-mounts empty on next rerun.
+if "uploader_key" not in st.session_state:
+    st.session_state["uploader_key"] = 0
+
+col_up, col_clear = st.columns([5, 1])
+with col_clear:
+    st.write("")  # small spacer so the button sits next to the uploader
+    if st.button("Clear", use_container_width=True):
+        st.session_state["uploader_key"] += 1
+        st.rerun()
+
+with col_up:
+    uploads = st.file_uploader(
+        "Drop .sor, .json files and/or a .zip here",
+        type=["sor", "json", "zip"],
+        accept_multiple_files=True,
+        key=f"uploader_{st.session_state['uploader_key']}",
+    )
 
 if not uploads:
     st.info("Waiting for files…")
