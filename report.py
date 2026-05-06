@@ -237,8 +237,7 @@ def _embed_logo():
 
 _BASE_CSS = """
 @page { size: landscape; margin: 10mm 10mm 18mm 10mm;
-  @bottom-center { content: "Page " counter(page) " of " counter(pages); font-size: 8px; }
-  @bottom-right  { content: "\\A9  ZeroDB"; font-size: 8px; } }
+  @bottom-center { content: "Page " counter(page) " of " counter(pages); font-size: 8px; } }
 * { box-sizing:border-box; margin:0; padding:0; }
 body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
         color:#2c2c2a; padding:16px; font-size:11px; max-width:1400px; margin:0 auto; }
