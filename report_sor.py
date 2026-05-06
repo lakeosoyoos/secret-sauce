@@ -97,15 +97,17 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
         bottom-right: per-pair likelihood vs similarity score
     When `shape_rs` is None, reverts to a 2-panel column (top-left + bottom-left)."""
     if shape_rs is not None:
-        fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+        # 13x6 keeps the chart compact enough that section 1 banner + the 2x2
+        # grid fit on the same landscape page as the title/cards header.
+        fig, axes = plt.subplots(2, 2, figsize=(13, 6))
         ax1, axR  = axes[0, 0], axes[0, 1]
         ax2, axRS = axes[1, 0], axes[1, 1]
     else:
-        fig, axes = plt.subplots(2, 1, figsize=(13, 8))
+        fig, axes = plt.subplots(2, 1, figsize=(13, 5.5))
         ax1, ax2 = axes
         axR = axRS = None
-    legend_kw = dict(loc='upper center', bbox_to_anchor=(0.5, -0.20),
-                     ncol=2, fontsize=8, frameon=False)
+    legend_kw = dict(loc='upper center', bbox_to_anchor=(0.5, -0.30),
+                     ncol=2, fontsize=7.5, frameon=False)
 
     log_s = np.log10(np.maximum(scores, 1e-9))
     counts, bin_edges, _ = ax1.hist(log_s, bins=50, color='#4A90D9',
@@ -345,6 +347,20 @@ def build_report_sor(folder, title, out_pdf):
                      f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td>'
                      f'{r_cell}</tr>')
 
+    # Top 30 by similarity (highest first). Skip pairs where similarity is None.
+    sim_pairs = [(i, p) for i, p in enumerate(pairs) if p.get('shape_r') is not None]
+    sim_order = sorted(sim_pairs, key=lambda x: -x[1]['shape_r'])[:30]
+    sim_rows = ''
+    for rank, (k, p) in enumerate(sim_order, 1):
+        pd_val = p['p_dup']
+        pd_color = '#2d8f48' if pd_val > 0.9 else ('#b97000' if pd_val > 0.1 else '#888')
+        r_val = p['shape_r']
+        sim_rows += (f'<tr><td class="center">{rank}</td>'
+                     f'<td class="pair-cell">{p["a"]} ↔ {p["b"]}</td>'
+                     f'<td class="center" style="color:{_shape_color(r_val)};font-weight:600">{r_val:.4f}</td>'
+                     f'<td class="center">{p["score"]:.4f}</td>'
+                     f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td></tr>')
+
     # Confirmed-duplicate detail table (p_dup > 0.5)
     file_by_name = {f['name']: f for f in files}
     dup_pairs_sorted = sorted([p for p in pairs if p['p_dup'] > 0.5],
@@ -378,7 +394,7 @@ def build_report_sor(folder, title, out_pdf):
         wl_hdr = f'{int(files[0].get("wavelength") or 0)} nm' if files else ''
         dup_detail_block = f'''
 <div class="section-block">
-<div class="dir-banner">4. Confirmed duplicate pairs (≥50% likelihood) — detail ({wl_hdr})</div>
+<div class="dir-banner">5. Confirmed duplicate pairs (≥50% likelihood) — detail ({wl_hdr})</div>
 <table class="vote-table">
 <tr><th style="text-align:left">Pair</th><th>Time gap</th>
   <th>max splice Δ (mdB)</th><th>span loss Δ (mdB)</th>
@@ -397,6 +413,11 @@ def build_report_sor(folder, title, out_pdf):
 <h1>{title}</h1>
 <div class="subtitle">{len(files)} files &bull; {len(pairs)} pairs &bull; generated {generated}</div>
 
+<div class="section-block">
+<div class="dir-banner">1. Distribution</div>
+<img src="data:image/png;base64,{dist_chart}" class="chart-img" />
+</div>
+
 {verdict_block}
 
 <div class="cards">
@@ -408,11 +429,6 @@ def build_report_sor(folder, title, out_pdf):
     <div class="card-value">{n50}</div></div>
   <div class="card"><div class="card-label">Likelihood &gt; 10%</div>
     <div class="card-value">{n10}</div></div>
-</div>
-
-<div class="section-block">
-<div class="dir-banner">1. Distribution</div>
-<img src="data:image/png;base64,{dist_chart}" class="chart-img" />
 </div>
 
 <div class="section-block">
@@ -432,6 +448,15 @@ def build_report_sor(folder, title, out_pdf):
 <tr><th>Rank</th><th style="text-align:left">Pair</th>
     <th>level of disagreement</th><th>Duplicate likelihood</th><th>similarity</th></tr>
 {top_rows}
+</table>
+</div>
+
+<div class="section-block">
+<div class="dir-banner">4. Top 30 pairs — highest similarity</div>
+<table class="vote-table">
+<tr><th>Rank</th><th style="text-align:left">Pair</th>
+    <th>similarity</th><th>level of disagreement</th><th>Duplicate likelihood</th></tr>
+{sim_rows}
 </table>
 </div>
 {dup_detail_block}
