@@ -89,8 +89,17 @@ def _pair_shape_r(a, b, interior_start, interior_end):
     return float(np.dot(da - da.mean(), db - db.mean()) / (sa * sb * len(da)))
 
 
-def _distribution_chart(scores, p_dup, stats):
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13, 8))
+def _distribution_chart(scores, p_dup, stats, shape_rs=None):
+    """Three stacked panels: match-score distribution → Pearson r distribution
+    → per-pair likelihood. Pass `shape_rs` parallel to `scores`/`p_dup` to
+    populate the middle panel; if absent, the chart reverts to two panels."""
+    n_panels = 3 if shape_rs is not None else 2
+    fig, axes = plt.subplots(n_panels, 1, figsize=(13, 4 * n_panels))
+    if n_panels == 2:
+        ax1, ax2 = axes
+    else:
+        ax1, axR, ax2 = axes
+
     log_s = np.log10(np.maximum(scores, 1e-9))
     ax1.hist(log_s, bins=50, color='#4A90D9', alpha=0.75, edgecolor='white', density=True)
     x = np.linspace(log_s.min() - 0.2, log_s.max() + 0.2, 400)
@@ -106,6 +115,34 @@ def _distribution_chart(scores, p_dup, stats):
     ax1.set_title('Pair match-score distribution with cluster fit', fontweight='bold')
     ax1.legend(loc='upper right', fontsize=9)
     ax1.grid(alpha=0.3)
+
+    if n_panels == 3:
+        rs = np.asarray([r if r is not None else np.nan for r in shape_rs],
+                        dtype=np.float64)
+        rs_valid = rs[~np.isnan(rs)]
+        if rs_valid.size:
+            # Histogram bins focused on the [0.9, 1.0] tail where same-fiber lives,
+            # but expand if any pair sits below 0.9 so we see the full picture.
+            lo = min(0.9, float(rs_valid.min()) - 0.005)
+            hi = min(1.0001, float(rs_valid.max()) + 0.005)
+            bins = np.linspace(lo, hi, 60)
+            axR.hist(rs_valid, bins=bins, color='#4A90D9', alpha=0.75,
+                     edgecolor='white')
+            # Tier markers: green ≥ 0.99, orange 0.95–0.99, grey < 0.95.
+            axR.axvspan(0.99, hi, color=_COLOR_HIGH, alpha=0.10)
+            axR.axvspan(0.95, 0.99, color=_COLOR_MID, alpha=0.10)
+            axR.axvline(0.99, linestyle='--', color=_COLOR_HIGH, linewidth=1.3,
+                        label='r ≥ 0.99 (same fiber)')
+            axR.axvline(0.95, linestyle=':', color=_COLOR_MID, linewidth=1.2,
+                        label='r = 0.95 (borderline floor)')
+            axR.set_xlim(lo, hi)
+        axR.set_xlabel('detrended Pearson r per pair (shape match)')
+        axR.set_ylabel('Number of pairs')
+        ttl = ('Pearson r distribution — duplicates concentrate near 1.0'
+               if rs_valid.size else 'Pearson r unavailable')
+        axR.set_title(ttl, fontweight='bold')
+        axR.legend(loc='upper left', fontsize=9)
+        axR.grid(axis='y', alpha=0.3)
 
     # Tier masks: high ≥ 0.9, mid 0.5–0.9, low ≤ 0.5. Colors match the tables.
     p = np.asarray(p_dup)
@@ -203,7 +240,8 @@ def build_report_sor(folder, title, out_pdf):
                      '<div class="verdict-box verdict-dispute">'
                      '<b>No duplicate pairs identified</b> at ≥50% likelihood.</div>')
 
-    dist_chart = _distribution_chart(scores, p_dup, stats)
+    shape_rs = [p.get('shape_r') for p in pairs]
+    dist_chart = _distribution_chart(scores, p_dup, stats, shape_rs=shape_rs)
 
     file_rows = ''
     for f in sorted(files, key=lambda x: x['name']):
