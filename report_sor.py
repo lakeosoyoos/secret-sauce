@@ -123,15 +123,15 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
     ax1.legend(loc='upper right', fontsize=9)
     ax1.grid(alpha=0.3)
 
-    if n_panels == 3:
+    if axR is not None:
         rs = np.asarray([r if r is not None else np.nan for r in shape_rs],
                         dtype=np.float64)
         rs_valid = rs[~np.isnan(rs)]
+        # Always show out to similarity = 1.0 with the 0.95/0.99 thresholds
+        # visible, so the reference lines anchor the reader's eye.
+        lo = min(0.4, float(rs_valid.min()) - 0.02) if rs_valid.size else 0.4
+        hi = 1.005
         if rs_valid.size:
-            # Histogram bins focused on the [0.9, 1.0] tail where same-fiber lives,
-            # but expand if any pair sits below 0.9 so we see the full picture.
-            lo = min(0.9, float(rs_valid.min()) - 0.005)
-            hi = min(1.0001, float(rs_valid.max()) + 0.005)
             bins = np.linspace(lo, hi, 60)
             axR.hist(rs_valid, bins=bins, color='#4A90D9', alpha=0.75,
                      edgecolor='white')
@@ -139,10 +139,10 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
             axR.axvspan(0.99, hi, color=_COLOR_HIGH, alpha=0.10)
             axR.axvspan(0.95, 0.99, color=_COLOR_MID, alpha=0.10)
             axR.axvline(0.99, linestyle='--', color=_COLOR_HIGH, linewidth=1.3,
-                        label='r ≥ 0.99 (same fiber)')
+                        label='≥ 0.99 (same fiber)')
             axR.axvline(0.95, linestyle=':', color=_COLOR_MID, linewidth=1.2,
-                        label='r = 0.95 (borderline floor)')
-            axR.set_xlim(lo, hi)
+                        label='= 0.95 (borderline floor)')
+        axR.set_xlim(lo, hi)
         axR.set_xlabel('similarity score per pair')
         axR.set_ylabel('Number of pairs')
         ttl = ('Similarity score distribution — duplicates concentrate near 1.0'
@@ -203,6 +203,10 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
         axRS.axhline(0.5, color=_COLOR_MID, linestyle='--', alpha=0.5, linewidth=1)
         axRS.axvline(0.99, color=_COLOR_HIGH, linestyle=':', alpha=0.4, linewidth=1)
         axRS.axvline(0.95, color=_COLOR_MID, linestyle='--', alpha=0.5, linewidth=1)
+        # Lock x-axis so the 0.95 / 0.99 reference lines always show.
+        rs_valid_pts = rs_full[valid]
+        rs_lo = min(0.4, float(rs_valid_pts.min()) - 0.02) if rs_valid_pts.size else 0.4
+        axRS.set_xlim(rs_lo, 1.005)
         axRS.set_xlabel('similarity score per pair')
         axRS.set_ylabel('duplicate likelihood')
         axRS.set_title('Per-pair likelihood vs similarity score', fontweight='bold')
