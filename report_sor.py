@@ -215,10 +215,28 @@ def build_report_sor(folder, title, out_pdf):
         raise RuntimeError('No comparable pairs after interior masking')
 
     scores = np.array([p['score'] for p in pairs], dtype=np.float64)
-    p_dup, stats = _outlier_probability(scores)
-    for p, pd, z in zip(pairs, p_dup, stats['z']):
-        p['p_dup'] = float(pd)
-        p['z'] = float(z)
+    p_dup_sigma, stats = _outlier_probability(scores)
+
+    # Pearson-shape contribution: r ≥ 0.99 → 1.0, r ≤ 0.95 → 0, linear in between.
+    # Same ramp as JSON/TRC mode, so the verdict reads the combined likelihood.
+    def _r_to_p(r):
+        if r is None:
+            return 0.0
+        if r >= 0.99:
+            return 1.0
+        if r <= 0.95:
+            return 0.0
+        return float((r - 0.95) / 0.04)
+
+    p_dup_r = np.array([_r_to_p(p.get('shape_r')) for p in pairs],
+                       dtype=np.float64)
+    # Combined likelihood = max of σ-outlier and shape-correlation tiers.
+    p_dup = np.maximum(p_dup_sigma, p_dup_r)
+    for i, p in enumerate(pairs):
+        p['p_dup_sigma'] = float(p_dup_sigma[i])
+        p['p_dup_r']     = float(p_dup_r[i])
+        p['p_dup']       = float(p_dup[i])
+        p['z']           = float(stats['z'][i])
 
     order = np.argsort(scores)
     n99 = int((p_dup > 0.99).sum())
