@@ -101,9 +101,12 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
         ax1, axR, ax2 = axes
 
     log_s = np.log10(np.maximum(scores, 1e-9))
-    ax1.hist(log_s, bins=50, color='#4A90D9', alpha=0.75, edgecolor='white', density=True)
+    counts, bin_edges, _ = ax1.hist(log_s, bins=50, color='#4A90D9',
+                                    alpha=0.75, edgecolor='white')
+    bin_width = bin_edges[1] - bin_edges[0]
+    # Scale the Gaussian PDF to raw-count units so it overlays the histogram.
     x = np.linspace(log_s.min() - 0.2, log_s.max() + 0.2, 400)
-    ax1.plot(x, norm.pdf(x, stats['center_log'], stats['spread_log']),
+    ax1.plot(x, norm.pdf(x, stats['center_log'], stats['spread_log']) * len(log_s) * bin_width,
              color='#b97000', linewidth=2, label='cluster fit')
     ax1.axvline(stats['center_log'], linestyle='--', color='#b97000', alpha=0.7)
     for z_line in (-3, -5, -10):
@@ -111,7 +114,7 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
                     linestyle=':', color='#888', alpha=0.5)
     ax1.set_xticklabels([])
     ax1.set_xlabel('match score (log scale)')
-    ax1.set_ylabel('density')
+    ax1.set_ylabel('Number of pairs')
     ax1.set_title('Pair match-score distribution with cluster fit', fontweight='bold')
     ax1.legend(loc='upper right', fontsize=9)
     ax1.grid(alpha=0.3)
