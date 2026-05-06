@@ -315,7 +315,7 @@ def chart_distribution(all_pairs_list):
             ax.set_title(f'{wl} nm — duplicates separate {non_min/dup_max:.1f}× below non-duplicates',
                          fontweight='bold', loc='left')
         else:
-            ax.set_title(f'{wl} nm — match-score distribution', fontweight='bold', loc='left')
+            ax.set_title(f'{wl} nm — level-of-disagreement distribution', fontweight='bold', loc='left')
         if lo:
             ax.scatter(lo, rng.uniform(0.25, 0.55, len(lo)),
                        color=_COLOR_LOW, alpha=0.55, s=55, edgecolor='white', linewidth=0.4,
@@ -337,7 +337,7 @@ def chart_distribution(all_pairs_list):
         ax.set_ylim(0, 1)
         ax.set_yticks([])
         ax.set_xticklabels([])
-        ax.set_xlabel(f'match score @ {wl} nm (log scale)', fontsize=10)
+        ax.set_xlabel(f'level of disagreement @ {wl} nm (log scale)', fontsize=10)
         ax.grid(axis='x', alpha=0.3, which='both')
         ax.legend(loc='upper right', fontsize=8, ncol=2)
 
@@ -368,12 +368,12 @@ def chart_distribution(all_pairs_list):
     ax.set_ylim(0, 1)
     ax.set_yticks([])
     ax.set_xticklabels([])
-    ax.set_xlabel('combined match score across 3 wavelengths (log scale)', fontsize=10)
+    ax.set_xlabel('combined level of disagreement across 3 wavelengths (log scale)', fontsize=10)
     ax.grid(axis='x', alpha=0.3, which='both')
-    ax.set_title('Combined 3λ match-score distribution', fontweight='bold', loc='left')
+    ax.set_title('Combined 3λ level-of-disagreement distribution', fontweight='bold', loc='left')
     ax.legend(loc='upper right', fontsize=8, ncol=2)
 
-    fig.suptitle(f'Match-score distribution across {len(all_pairs_list)} pairs',
+    fig.suptitle(f'Level-of-disagreement distribution across {len(all_pairs_list)} pairs',
                  fontsize=13, fontweight='bold', y=1.00)
     plt.tight_layout()
     buf = BytesIO()
@@ -415,9 +415,9 @@ def chart_histogram(all_pairs_list):
     ax.axvline(_SCORE_GATE * 3, color=_COLOR_MID, linestyle='--', linewidth=1.3,
                label='decision threshold')
     ax.set_xticklabels([])
-    ax.set_xlabel('combined match score across 3 wavelengths')
+    ax.set_xlabel('combined level of disagreement across 3 wavelengths')
     ax.set_ylabel('Number of non-duplicate pairs')
-    ax.set_title('Histogram — combined 3λ match score', fontweight='bold')
+    ax.set_title('Histogram — combined 3λ level of disagreement', fontweight='bold')
     ax.legend(loc='upper right', fontsize=9)
     ax.grid(axis='y', alpha=0.3)
     plt.tight_layout()
@@ -564,9 +564,9 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
     if dup_detail_rows:
         ms_hdrs = ''.join(f'<th>max splice Δ @ {wl} (mdB)</th>' for wl in WL_ORDER)
         sl_hdrs = ''.join(f'<th>span loss Δ @ {wl} (mdB)</th>' for wl in WL_ORDER)
-        sr_hdrs = ''.join(f'<th>shape r @ {wl}</th>' for wl in WL_ORDER)
+        sr_hdrs = ''.join(f'<th>similarity @ {wl}</th>' for wl in WL_ORDER)
         dup_detail_block = f'''
-<div class="dir-banner">Confirmed duplicate pairs (≥50% likelihood) — detail</div>
+<div class="dir-banner">4. Confirmed duplicate pairs (≥50% likelihood) — detail</div>
 <table class="vote-table">
 <tr><th style="text-align:left">Pair</th><th>Time gap</th>
   {ms_hdrs}{sl_hdrs}{sr_hdrs}<th>Duplicate likelihood</th></tr>
@@ -645,28 +645,28 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
     <div class="card-value">{int((p_dup_arr>0.1).sum())}</div></div>
 </div>
 
-<div class="dir-banner">Distribution — duplicates vs non-duplicates</div>
+<div class="dir-banner">1. Distribution</div>
 <img src="data:image/png;base64,{distribution_chart}" class="chart-img" />
 
-<div class="dir-banner">Histogram — combined 3λ match score</div>
+<div class="dir-banner">2. Histogram — combined 3λ level of disagreement</div>
 <img src="data:image/png;base64,{histogram_chart}" class="chart-img" />
 
-<div class="dir-banner">All {len(files)} files — per-file verdict</div>
+<div class="dir-banner">3. All {len(files)} files — per-file verdict</div>
 <table class="vote-table">
 <tr><th style="text-align:left">File</th><th>Acquisition time</th>
-  <th>score @ 1310</th><th>score @ 1550</th><th>score @ 1625</th>
-  <th>combined score</th><th>Duplicate likelihood</th>
-  <th>shape r (min λ)</th><th>Verdict</th></tr>
+  <th>disagreement @ 1310</th><th>disagreement @ 1550</th><th>disagreement @ 1625</th>
+  <th>combined disagreement</th><th>Duplicate likelihood</th>
+  <th>similarity (min λ)</th><th>Verdict</th></tr>
 {file_rows}
 </table>
 
 {dup_detail_block}
 
-<div class="dir-banner">Closest non-duplicate pairs</div>
+<div class="dir-banner">5. Closest non-duplicate pairs</div>
 <table class="vote-table">
 <tr><th style="text-align:left">Pair</th>
-  <th>score @ 1310</th><th>score @ 1550</th><th>score @ 1625</th><th>combined</th>
-  <th>Duplicate likelihood</th><th>shape r (min λ)</th></tr>
+  <th>disagreement @ 1310</th><th>disagreement @ 1550</th><th>disagreement @ 1625</th><th>combined</th>
+  <th>Duplicate likelihood</th><th>similarity (min λ)</th></tr>
 {nondup_rows}
 </table>
 

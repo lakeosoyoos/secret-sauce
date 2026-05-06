@@ -90,15 +90,19 @@ def _pair_shape_r(a, b, interior_start, interior_end):
 
 
 def _distribution_chart(scores, p_dup, stats, shape_rs=None):
-    """Three stacked panels: match-score distribution → Pearson r distribution
-    → per-pair likelihood. Pass `shape_rs` parallel to `scores`/`p_dup` to
-    populate the middle panel; if absent, the chart reverts to two panels."""
-    n_panels = 3 if shape_rs is not None else 2
+    """Stacked panels:
+        1. level-of-disagreement distribution (histogram with cluster fit)
+        2. similarity score distribution (histogram with same-fiber tiers)
+        3. per-pair likelihood vs level of disagreement
+        4. per-pair likelihood vs similarity score
+    When `shape_rs` is None, reverts to a 2-panel chart (1 + 3)."""
+    n_panels = 4 if shape_rs is not None else 2
     fig, axes = plt.subplots(n_panels, 1, figsize=(13, 4 * n_panels))
     if n_panels == 2:
         ax1, ax2 = axes
+        axR = axRS = None
     else:
-        ax1, axR, ax2 = axes
+        ax1, axR, ax2, axRS = axes
 
     log_s = np.log10(np.maximum(scores, 1e-9))
     counts, bin_edges, _ = ax1.hist(log_s, bins=50, color='#4A90D9',
@@ -113,9 +117,9 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
         ax1.axvline(stats['center_log'] + z_line * stats['spread_log'],
                     linestyle=':', color='#888', alpha=0.5)
     ax1.set_xticklabels([])
-    ax1.set_xlabel('match score (log scale)')
+    ax1.set_xlabel('level of disagreement (log scale)')
     ax1.set_ylabel('Number of pairs')
-    ax1.set_title('Pair match-score distribution with cluster fit', fontweight='bold')
+    ax1.set_title('Pair level-of-disagreement distribution with cluster fit', fontweight='bold')
     ax1.legend(loc='upper right', fontsize=9)
     ax1.grid(alpha=0.3)
 
@@ -139,10 +143,10 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
             axR.axvline(0.95, linestyle=':', color=_COLOR_MID, linewidth=1.2,
                         label='r = 0.95 (borderline floor)')
             axR.set_xlim(lo, hi)
-        axR.set_xlabel('detrended Pearson r per pair (shape match)')
+        axR.set_xlabel('similarity score per pair')
         axR.set_ylabel('Number of pairs')
-        ttl = ('Pearson r distribution — duplicates concentrate near 1.0'
-               if rs_valid.size else 'Pearson r unavailable')
+        ttl = ('Similarity score distribution — duplicates concentrate near 1.0'
+               if rs_valid.size else 'Similarity score unavailable')
         axR.set_title(ttl, fontweight='bold')
         axR.legend(loc='upper left', fontsize=9)
         axR.grid(axis='y', alpha=0.3)
@@ -167,11 +171,44 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
     ax2.axhline(0.9, color=_COLOR_HIGH, linestyle=':', alpha=0.4, linewidth=1)
     ax2.axhline(0.5, color=_COLOR_MID, linestyle='--', alpha=0.5, linewidth=1)
     ax2.set_xticklabels([])
-    ax2.set_xlabel('match score (log scale)')
+    ax2.set_xlabel('level of disagreement (log scale)')
     ax2.set_ylabel('duplicate likelihood')
-    ax2.set_title('Per-pair likelihood vs match score', fontweight='bold')
+    ax2.set_title('Per-pair likelihood vs level of disagreement', fontweight='bold')
     ax2.legend(loc='upper right', fontsize=9)
     ax2.grid(alpha=0.3)
+
+    if axRS is not None:
+        # Per-pair likelihood vs similarity score (Pearson r). Same tier-color
+        # masks as the disagreement scatter, so high/mid/low pairs render
+        # consistently between panels.
+        rs_full = np.asarray([r if r is not None else np.nan for r in shape_rs],
+                             dtype=np.float64)
+        valid = ~np.isnan(rs_full)
+        m_hi_v = m_hi & valid
+        m_md_v = m_md & valid
+        m_lo_v = m_lo & valid
+        if m_lo_v.any():
+            axRS.scatter(rs_full[m_lo_v], p[m_lo_v], s=45, alpha=0.6,
+                         color=_COLOR_LOW, edgecolor='white', linewidth=0.5,
+                         label=f'Non-duplicate (n={int(m_lo_v.sum())})')
+        if m_md_v.any():
+            axRS.scatter(rs_full[m_md_v], p[m_md_v], s=120, alpha=0.95,
+                         color=_COLOR_MID, edgecolor='black', linewidth=1, zorder=4,
+                         label=f'Borderline 50–90% (n={int(m_md_v.sum())})')
+        if m_hi_v.any():
+            axRS.scatter(rs_full[m_hi_v], p[m_hi_v], s=140, alpha=0.95,
+                         color=_COLOR_HIGH, edgecolor='black', linewidth=1, zorder=5,
+                         label=f'Duplicate ≥90% (n={int(m_hi_v.sum())})')
+        axRS.axhline(0.9, color=_COLOR_HIGH, linestyle=':', alpha=0.4, linewidth=1)
+        axRS.axhline(0.5, color=_COLOR_MID, linestyle='--', alpha=0.5, linewidth=1)
+        axRS.axvline(0.99, color=_COLOR_HIGH, linestyle=':', alpha=0.4, linewidth=1)
+        axRS.axvline(0.95, color=_COLOR_MID, linestyle='--', alpha=0.5, linewidth=1)
+        axRS.set_xlabel('similarity score per pair')
+        axRS.set_ylabel('duplicate likelihood')
+        axRS.set_title('Per-pair likelihood vs similarity score', fontweight='bold')
+        axRS.legend(loc='upper left', fontsize=9)
+        axRS.grid(alpha=0.3)
+
     plt.tight_layout()
     buf = BytesIO()
     plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
@@ -333,11 +370,11 @@ def build_report_sor(folder, title, out_pdf):
     if dup_detail_rows:
         wl_hdr = f'{int(files[0].get("wavelength") or 0)} nm' if files else ''
         dup_detail_block = f'''
-<div class="dir-banner">Confirmed duplicate pairs (≥50% likelihood) — detail ({wl_hdr})</div>
+<div class="dir-banner">4. Confirmed duplicate pairs (≥50% likelihood) — detail ({wl_hdr})</div>
 <table class="vote-table">
 <tr><th style="text-align:left">Pair</th><th>Time gap</th>
   <th>max splice Δ (mdB)</th><th>span loss Δ (mdB)</th>
-  <th>shape r</th><th>Duplicate likelihood</th></tr>
+  <th>similarity</th><th>Duplicate likelihood</th></tr>
 {dup_detail_rows}
 </table>
 '''
@@ -364,22 +401,22 @@ def build_report_sor(folder, title, out_pdf):
     <div class="card-value">{n10}</div></div>
 </div>
 
-<div class="dir-banner">Distribution — duplicates vs non-duplicates</div>
+<div class="dir-banner">1. Distribution</div>
 <img src="data:image/png;base64,{dist_chart}" class="chart-img" />
 
-<div class="dir-banner">Per-file verdict</div>
+<div class="dir-banner">2. Per-file verdict</div>
 <table class="vote-table">
 <tr><th style="text-align:left">File</th>
     <th>Length (km)</th><th>Span loss (dB)</th>
-    <th>best-match score</th><th>Duplicate likelihood</th>
-    <th>shape r</th><th>Verdict</th></tr>
+    <th>lowest disagreement</th><th>Duplicate likelihood</th>
+    <th>similarity</th><th>Verdict</th></tr>
 {file_rows}
 </table>
 
-<div class="dir-banner">Top 30 pairs — tightest match score</div>
+<div class="dir-banner">3. Top 30 pairs — lowest level of disagreement</div>
 <table class="vote-table">
 <tr><th>Rank</th><th style="text-align:left">Pair</th>
-    <th>match score</th><th>Duplicate likelihood</th><th>shape r</th></tr>
+    <th>level of disagreement</th><th>Duplicate likelihood</th><th>similarity</th></tr>
 {top_rows}
 </table>
 {dup_detail_block}
