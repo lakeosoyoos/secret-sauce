@@ -394,7 +394,7 @@ def build_report_sor(folder, title, out_pdf):
         wl_hdr = f'{int(files[0].get("wavelength") or 0)} nm' if files else ''
         dup_detail_block = f'''
 <div class="section-block">
-<div class="dir-banner">5. Confirmed duplicate pairs (≥50% likelihood) — detail ({wl_hdr})</div>
+<div class="dir-banner">3. Confirmed duplicate pairs (≥50% likelihood) — detail ({wl_hdr})</div>
 <table class="vote-table">
 <tr><th style="text-align:left">Pair</th><th>Time gap</th>
   <th>max splice Δ (mdB)</th><th>span loss Δ (mdB)</th>
@@ -442,8 +442,10 @@ def build_report_sor(folder, title, out_pdf):
 </table>
 </div>
 
+{dup_detail_block}
+
 <div class="section-block">
-<div class="dir-banner">3. Top 30 pairs — lowest level of disagreement</div>
+<div class="dir-banner">4. Top 30 pairs — lowest level of disagreement</div>
 <table class="vote-table">
 <tr><th>Rank</th><th style="text-align:left">Pair</th>
     <th>level of disagreement</th><th>Duplicate likelihood</th><th>similarity</th></tr>
@@ -452,14 +454,13 @@ def build_report_sor(folder, title, out_pdf):
 </div>
 
 <div class="section-block">
-<div class="dir-banner">4. Top 30 pairs — highest similarity</div>
+<div class="dir-banner">5. Top 30 pairs — highest similarity</div>
 <table class="vote-table">
 <tr><th>Rank</th><th style="text-align:left">Pair</th>
     <th>similarity</th><th>level of disagreement</th><th>Duplicate likelihood</th></tr>
 {sim_rows}
 </table>
 </div>
-{dup_detail_block}
 </body></html>'''
 
     pdf_bytes = html_to_pdf_bytes(html, base_url=folder)
