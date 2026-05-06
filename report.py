@@ -267,6 +267,11 @@ h2 { font-size:14px; font-weight:500; margin:24px 0 8px; page-break-after:avoid;
                page-break-after:avoid; break-after:avoid; }
 h1, h2 { page-break-after:avoid; break-after:avoid; }
 .chart-img { page-break-inside:avoid; break-inside:avoid; }
+/* Wrap each section banner with its content so they travel together
+   across page breaks. For sections whose content is a long table that
+   exceeds one page, the renderer falls back to breaking at row
+   boundaries (vote-table tr also has page-break-inside:avoid). */
+.section-block { page-break-inside:avoid; break-inside:avoid; }
 .verdict-box { padding:14px 18px; border-radius:10px; font-size:13px; font-weight:600;
                margin:16px 0; }
 .verdict-confirm { background:#e8f5ec; color:#1f6b35; border:1px solid #bce0c6; }
@@ -570,12 +575,14 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
         sl_hdrs = ''.join(f'<th>span loss Δ @ {wl} (mdB)</th>' for wl in WL_ORDER)
         sr_hdrs = ''.join(f'<th>similarity @ {wl}</th>' for wl in WL_ORDER)
         dup_detail_block = f'''
+<div class="section-block">
 <div class="dir-banner">4. Confirmed duplicate pairs (≥50% likelihood) — detail</div>
 <table class="vote-table">
 <tr><th style="text-align:left">Pair</th><th>Time gap</th>
   {ms_hdrs}{sl_hdrs}{sr_hdrs}<th>Duplicate likelihood</th></tr>
 {dup_detail_rows}
 </table>
+</div>
 '''
 
     nonconf_sorted = sorted(
@@ -649,12 +656,17 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
     <div class="card-value">{int((p_dup_arr>0.1).sum())}</div></div>
 </div>
 
+<div class="section-block">
 <div class="dir-banner">1. Distribution</div>
 <img src="data:image/png;base64,{distribution_chart}" class="chart-img" />
+</div>
 
+<div class="section-block">
 <div class="dir-banner">2. Histogram — combined 3λ level of disagreement</div>
 <img src="data:image/png;base64,{histogram_chart}" class="chart-img" />
+</div>
 
+<div class="section-block">
 <div class="dir-banner">3. All {len(files)} files — per-file verdict</div>
 <table class="vote-table">
 <tr><th style="text-align:left">File</th><th>Acquisition time</th>
@@ -663,9 +675,11 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
   <th>similarity (min λ)</th><th>Verdict</th></tr>
 {file_rows}
 </table>
+</div>
 
 {dup_detail_block}
 
+<div class="section-block">
 <div class="dir-banner">5. Closest non-duplicate pairs</div>
 <table class="vote-table">
 <tr><th style="text-align:left">Pair</th>
@@ -673,6 +687,7 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
   <th>Duplicate likelihood</th><th>similarity (min λ)</th></tr>
 {nondup_rows}
 </table>
+</div>
 
 </body></html>'''
 

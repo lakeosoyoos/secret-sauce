@@ -377,6 +377,7 @@ def build_report_sor(folder, title, out_pdf):
     if dup_detail_rows:
         wl_hdr = f'{int(files[0].get("wavelength") or 0)} nm' if files else ''
         dup_detail_block = f'''
+<div class="section-block">
 <div class="dir-banner">4. Confirmed duplicate pairs (≥50% likelihood) — detail ({wl_hdr})</div>
 <table class="vote-table">
 <tr><th style="text-align:left">Pair</th><th>Time gap</th>
@@ -384,6 +385,7 @@ def build_report_sor(folder, title, out_pdf):
   <th>similarity</th><th>Duplicate likelihood</th></tr>
 {dup_detail_rows}
 </table>
+</div>
 '''
 
     generated = datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -408,9 +410,12 @@ def build_report_sor(folder, title, out_pdf):
     <div class="card-value">{n10}</div></div>
 </div>
 
+<div class="section-block">
 <div class="dir-banner">1. Distribution</div>
 <img src="data:image/png;base64,{dist_chart}" class="chart-img" />
+</div>
 
+<div class="section-block">
 <div class="dir-banner">2. Per-file verdict</div>
 <table class="vote-table">
 <tr><th style="text-align:left">File</th>
@@ -419,13 +424,16 @@ def build_report_sor(folder, title, out_pdf):
     <th>similarity</th><th>Verdict</th></tr>
 {file_rows}
 </table>
+</div>
 
+<div class="section-block">
 <div class="dir-banner">3. Top 30 pairs — lowest level of disagreement</div>
 <table class="vote-table">
 <tr><th>Rank</th><th style="text-align:left">Pair</th>
     <th>level of disagreement</th><th>Duplicate likelihood</th><th>similarity</th></tr>
 {top_rows}
 </table>
+</div>
 {dup_detail_block}
 </body></html>'''
 
