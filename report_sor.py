@@ -48,6 +48,11 @@ def load_sor_file(path):
                    and not e.get('is_end')
                    and (e.get('dist_km') or 0) > 0.01]
     max_splice = max((abs(v) for v in splice_vals), default=None) if splice_vals else None
+    # Pull OTDR serial number from GenParams/SupParams so we can flag pairs
+    # acquired by different OTDRs in the confirmed-duplicate detail table.
+    from sor_reader324802a import parse_gen_params
+    gp = parse_gen_params(path) or {}
+    serial = (gp.get('serial_number') or '').strip() or None
     return {
         'name':     os.path.splitext(os.path.basename(path))[0],
         'filepath': path,
@@ -58,6 +63,7 @@ def load_sor_file(path):
         'max_splice_dB': max_splice,
         'timestamp': r.get('date_time'),
         'wavelength': r.get('exfo_wavelength_nm') or r.get('wavelength'),
+        'serial_number': serial,
         'events':   events,
     }
 
@@ -380,6 +386,15 @@ def build_report_sor(folder, title, out_pdf):
         sl_cell = (f'<td class="center">{abs(a_sl - b_sl)*1000:.0f}</td>'
                    if a_sl is not None and b_sl is not None
                    else '<td class="center na">—</td>')
+        # Same OTDR serial → both shots came from the same instrument.
+        sn_a, sn_b = fa.get('serial_number'), fb.get('serial_number')
+        if sn_a and sn_b:
+            same_sn = (sn_a == sn_b)
+            sn_cell = (f'<td class="center" style="color:#2d8f48;font-weight:700">Yes</td>'
+                       if same_sn else
+                       f'<td class="center" style="color:#c0392b;font-weight:700">No</td>')
+        else:
+            sn_cell = '<td class="center na">—</td>'
         pd_val = p['p_dup']
         pd_color = '#2d8f48' if pd_val > 0.9 else '#b97000'
         r_val = p.get('shape_r')
@@ -387,7 +402,7 @@ def build_report_sor(folder, title, out_pdf):
                   f'<td class="center" style="color:{_shape_color(r_val)};font-weight:600">{r_val:.4f}</td>')
         dup_detail_rows += (f'<tr><td class="pair-cell">{p["a"]} ↔ {p["b"]}</td>'
                             f'<td class="center">{gap_str}</td>'
-                            f'{ms_cell}{sl_cell}{r_cell}'
+                            f'{ms_cell}{sl_cell}{r_cell}{sn_cell}'
                             f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td></tr>')
     dup_detail_block = ''
     if dup_detail_rows:
@@ -398,7 +413,7 @@ def build_report_sor(folder, title, out_pdf):
 <table class="vote-table">
 <tr><th style="text-align:left">Pair</th><th>Time gap</th>
   <th>max splice Δ (mdB)</th><th>span loss Δ (mdB)</th>
-  <th>similarity</th><th>Duplicate likelihood</th></tr>
+  <th>similarity</th><th>Same OTDR</th><th>Duplicate likelihood</th></tr>
 {dup_detail_rows}
 </table>
 </div>
