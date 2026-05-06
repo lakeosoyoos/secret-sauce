@@ -253,7 +253,8 @@ h2 { font-size:14px; font-weight:500; margin:24px 0 8px; page-break-after:avoid;
 .card-sub { font-size:9px; color:#999; margin-top:2px; }
 .vote-table { width:100%; border-collapse:collapse; font-size:9.5px;
                font-family:'SF Mono','Courier New',monospace; margin-bottom:16px;
-               page-break-inside:avoid; }
+               page-break-inside:avoid; break-inside:avoid; }
+.vote-table tr { page-break-inside:avoid; break-inside:avoid; }
 .vote-table th { background:#f4f3f0; padding:5px 6px; text-align:center;
                   font-weight:600; border:0.5px solid #ddd; font-size:8px; color:#555; }
 .vote-table td { padding:4px 6px; border:0.5px solid #ddd; }
@@ -262,7 +263,10 @@ h2 { font-size:14px; font-weight:500; margin:24px 0 8px; page-break-after:avoid;
 .dup { color:#2d8f48; font-weight:700; }
 .na  { color:#888;    font-weight:500; }
 .dir-banner { background:#2C3E50; color:white; padding:10px 16px; border-radius:8px;
-               font-size:14px; font-weight:600; margin:28px 0 12px; }
+               font-size:14px; font-weight:600; margin:28px 0 12px;
+               page-break-after:avoid; break-after:avoid; }
+h1, h2 { page-break-after:avoid; break-after:avoid; }
+.chart-img { page-break-inside:avoid; break-inside:avoid; }
 .verdict-box { padding:14px 18px; border-radius:10px; font-size:13px; font-weight:600;
                margin:16px 0; }
 .verdict-confirm { background:#e8f5ec; color:#1f6b35; border:1px solid #bce0c6; }

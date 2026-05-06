@@ -90,19 +90,22 @@ def _pair_shape_r(a, b, interior_start, interior_end):
 
 
 def _distribution_chart(scores, p_dup, stats, shape_rs=None):
-    """Stacked panels:
-        1. level-of-disagreement distribution (histogram with cluster fit)
-        2. similarity score distribution (histogram with same-fiber tiers)
-        3. per-pair likelihood vs level of disagreement
-        4. per-pair likelihood vs similarity score
-    When `shape_rs` is None, reverts to a 2-panel chart (1 + 3)."""
-    n_panels = 4 if shape_rs is not None else 2
-    fig, axes = plt.subplots(n_panels, 1, figsize=(13, 4 * n_panels))
-    if n_panels == 2:
+    """2x2 grid of panels (4-mode) or stacked 2 (2-mode):
+        top-left:    level-of-disagreement distribution (histogram + cluster fit)
+        top-right:   similarity score distribution (histogram + same-fiber tiers)
+        bottom-left: per-pair likelihood vs level of disagreement
+        bottom-right: per-pair likelihood vs similarity score
+    When `shape_rs` is None, reverts to a 2-panel column (top-left + bottom-left)."""
+    if shape_rs is not None:
+        fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+        ax1, axR  = axes[0, 0], axes[0, 1]
+        ax2, axRS = axes[1, 0], axes[1, 1]
+    else:
+        fig, axes = plt.subplots(2, 1, figsize=(13, 8))
         ax1, ax2 = axes
         axR = axRS = None
-    else:
-        ax1, axR, ax2, axRS = axes
+    legend_kw = dict(loc='upper center', bbox_to_anchor=(0.5, -0.20),
+                     ncol=2, fontsize=8, frameon=False)
 
     log_s = np.log10(np.maximum(scores, 1e-9))
     counts, bin_edges, _ = ax1.hist(log_s, bins=50, color='#4A90D9',
@@ -120,7 +123,7 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
     ax1.set_xlabel('level of disagreement (log scale)')
     ax1.set_ylabel('Number of pairs')
     ax1.set_title('Pair level-of-disagreement distribution with cluster fit', fontweight='bold')
-    ax1.legend(loc='upper right', fontsize=9)
+    ax1.legend(**legend_kw)
     ax1.grid(alpha=0.3)
 
     if axR is not None:
@@ -148,7 +151,7 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
         ttl = ('Similarity score distribution — duplicates concentrate near 1.0'
                if rs_valid.size else 'Similarity score unavailable')
         axR.set_title(ttl, fontweight='bold')
-        axR.legend(loc='upper left', fontsize=9)
+        axR.legend(**legend_kw)
         axR.grid(axis='y', alpha=0.3)
 
     # Tier masks: high ≥ 0.9, mid 0.5–0.9, low ≤ 0.5. Colors match the tables.
@@ -174,7 +177,7 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
     ax2.set_xlabel('level of disagreement (log scale)')
     ax2.set_ylabel('duplicate likelihood')
     ax2.set_title('Per-pair likelihood vs level of disagreement', fontweight='bold')
-    ax2.legend(loc='upper right', fontsize=9)
+    ax2.legend(**legend_kw)
     ax2.grid(alpha=0.3)
 
     if axRS is not None:
@@ -210,7 +213,7 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
         axRS.set_xlabel('similarity score per pair')
         axRS.set_ylabel('duplicate likelihood')
         axRS.set_title('Per-pair likelihood vs similarity score', fontweight='bold')
-        axRS.legend(loc='upper left', fontsize=9)
+        axRS.legend(**legend_kw)
         axRS.grid(alpha=0.3)
 
     plt.tight_layout()
