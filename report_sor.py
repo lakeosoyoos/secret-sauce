@@ -325,13 +325,17 @@ def build_report_sor(folder, title, out_pdf):
     for ki in range(K):
         i = valid_idx[ki]
         name_i = files[i]['name']
+        len_i = files[i].get('length')
         for kj in range(ki + 1, K):
             j = valid_idx[kj]
+            len_j = files[j].get('length')
+            len_delta = (abs(len_i - len_j) if (len_i and len_j) else None)
             pairs.append({
                 'a': name_i,
                 'b': files[j]['name'],
                 'score': float(sigma_matrix[ki, kj]),
                 'shape_r': float(r_matrix[ki, kj]),
+                'length_delta_m': len_delta,
             })
     if not pairs:
         raise RuntimeError('No comparable pairs after interior masking')
@@ -354,11 +358,40 @@ def build_report_sor(folder, title, out_pdf):
     p_dup_r = np.array([_r_to_p(p.get('shape_r')) for p in pairs],
                        dtype=np.float64)
     # Combined likelihood = max of σ-outlier and shape-correlation tiers.
-    p_dup = np.maximum(p_dup_sigma, p_dup_r)
+    p_dup_raw = np.maximum(p_dup_sigma, p_dup_r)
+
+    # Physical-reality filter: same fiber must produce the same end-of-fiber
+    # length to within launch-connector + IOR + sample-resolution variation.
+    # Tolerance scales with fiber length but is bounded:
+    #   - floor 0.5 m  (launch-mating + OTDR sample resolution dominate at small spans)
+    #   - 0.01 % of length above 5 km
+    #   - cap 2 m      (avoid being too permissive on 100 km+ spans)
+    # When a pair's length delta exceeds tol, cap likelihood at 0.5 (borderline) —
+    # different physical fibers can't be the same fiber regardless of how similar
+    # their splice profiles look. Pairs with no length info pass through.
+    LEN_CAP = 0.5
+    def _len_tol_m(length_m):
+        if length_m is None or length_m <= 0:
+            return 0.5
+        return max(0.5, min(2.0, length_m * 1e-4))
+    length_deltas = np.array([(p.get('length_delta_m') or 0.0) for p in pairs], dtype=np.float64)
+    has_lengths = np.array([p.get('length_delta_m') is not None for p in pairs])
+    # Use the LONGER of the two fibers in the pair to set tolerance.
+    name_to_length = {f['name']: (f.get('length') or 0) for f in files}
+    pair_max_len = np.array([
+        max(name_to_length.get(p['a'], 0), name_to_length.get(p['b'], 0))
+        for p in pairs
+    ], dtype=np.float64)
+    tols = np.array([_len_tol_m(L) for L in pair_max_len], dtype=np.float64)
+    length_violation = has_lengths & (length_deltas > tols)
+    p_dup = np.where(length_violation, np.minimum(p_dup_raw, LEN_CAP), p_dup_raw)
+
     for i, p in enumerate(pairs):
         p['p_dup_sigma'] = float(p_dup_sigma[i])
         p['p_dup_r']     = float(p_dup_r[i])
+        p['p_dup_raw']   = float(p_dup_raw[i])
         p['p_dup']       = float(p_dup[i])
+        p['length_capped'] = bool(length_violation[i])
         p['z']           = float(stats['z'][i])
 
     order = np.argsort(scores)
