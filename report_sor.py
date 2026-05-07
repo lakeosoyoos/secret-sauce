@@ -78,6 +78,75 @@ def _pair_score(a, b, interior_start, interior_end):
     return float(np.std(ta[:n][mask] - tb[:n][mask]))
 
 
+def _event_match_quality(a_events, b_events, pos_tol_m=100.0):
+    """Greedy match interior splice/event detections by closest position.
+    Skips end-of-fiber and very-near-launch (< 10 m) events.
+
+    Returns (n_matched, n_max_events, n_min_events, mean_dloss_db). When
+    n_min_events < 3 the metric isn't meaningful — caller should treat as
+    'agree' by default.
+    """
+    def _interior(events):
+        out = []
+        for e in events or []:
+            if e.get('is_end'):
+                continue
+            d = e.get('dist_km') or 0
+            if d < 0.01:
+                continue
+            out.append((d * 1000.0, e.get('splice_loss') or 0.0))
+        return out
+
+    a = _interior(a_events)
+    b = _interior(b_events)
+    if not a or not b:
+        return 0, 0, 0.0
+    used_b = [False] * len(b)
+    matched_dloss = []
+    for pa, la in a:
+        best_j = -1
+        best_d = pos_tol_m + 1.0
+        for j, (pb, _) in enumerate(b):
+            if used_b[j]:
+                continue
+            d = abs(pa - pb)
+            if d < best_d:
+                best_d = d
+                best_j = j
+        if best_j >= 0 and best_d <= pos_tol_m:
+            matched_dloss.append(abs(la - b[best_j][1]))
+            used_b[best_j] = True
+    n_match = len(matched_dloss)
+    n_max = max(len(a), len(b))
+    n_min = min(len(a), len(b))
+    mean_dloss_db = float(np.mean(matched_dloss)) if matched_dloss else 0.0
+    return n_match, n_max, n_min, mean_dloss_db
+
+
+def _events_agree(n_match, n_max, n_min, mean_dloss_db,
+                  min_count=3, frac_thresh=0.85, loss_thresh_db=0.010):
+    """Return True iff the pair's events look like the same physical fiber.
+
+    Calibrated against measured-truth datasets:
+      - True same-fiber re-shoots: 100% match rate, mean |Δloss| ~1 mdB,
+        equal event counts.
+      - Different fibers in the same cable (DURSAN-style): 25-90% match
+        rate, mean |Δloss| 10-40 mdB, asymmetric event counts.
+
+    Default thresholds:
+      - at least 3 matched events
+      - ≥ 85% of the LONGER event list matched (penalizes asymmetric counts;
+        a real duplicate detects the same splices in both shots)
+      - mean loss difference ≤ 10 mdB (true dups are <2 mdB; this is
+        generously above noise but catches splice-aligned non-duplicates)
+    """
+    if n_min < min_count or n_max == 0:
+        return True  # too few events to evaluate — don't penalize
+    return (n_match >= min_count
+            and n_match / n_max >= frac_thresh
+            and mean_dloss_db <= loss_thresh_db)
+
+
 def _compute_pair_metrics_batch(files, interior_start, interior_end, min_samples=50):
     """Vectorized pair-metric computation. For N files this scales as O(N²·S)
     via two matmuls instead of O(N²) Python loops, so 864-file runs go from
@@ -384,15 +453,38 @@ def build_report_sor(folder, title, out_pdf):
     ], dtype=np.float64)
     tols = np.array([_len_tol_m(L) for L in pair_max_len], dtype=np.float64)
     length_violation = has_lengths & (length_deltas > tols)
-    p_dup = np.where(length_violation, np.minimum(p_dup_raw, LEN_CAP), p_dup_raw)
+
+    # Event-table consistency gate: same physical fiber → splice events match
+    # in count, position, and loss. Different fibers can share σ/r and even
+    # length (paths diverge then reconverge) but their event tables disagree.
+    # Only evaluate pairs that survived the σ/r screen, since pairs already
+    # at p_dup_raw < 0.1 won't be flagged regardless.
+    file_events = {f['name']: f.get('events') for f in files}
+    events_violation = np.zeros(len(pairs), dtype=bool)
+    EVENT_CHECK_THRESHOLD = 0.10
+    for i, p in enumerate(pairs):
+        if p_dup_raw[i] < EVENT_CHECK_THRESHOLD:
+            continue
+        n_match, n_max, n_min, mean_dloss = _event_match_quality(
+            file_events.get(p['a']), file_events.get(p['b']))
+        p['events_n_match'] = int(n_match)
+        p['events_n_max']   = int(n_max)
+        p['events_n_min']   = int(n_min)
+        p['events_mean_dloss_db'] = float(mean_dloss)
+        if not _events_agree(n_match, n_max, n_min, mean_dloss):
+            events_violation[i] = True
+
+    physical_violation = length_violation | events_violation
+    p_dup = np.where(physical_violation, np.minimum(p_dup_raw, LEN_CAP), p_dup_raw)
 
     for i, p in enumerate(pairs):
-        p['p_dup_sigma'] = float(p_dup_sigma[i])
-        p['p_dup_r']     = float(p_dup_r[i])
-        p['p_dup_raw']   = float(p_dup_raw[i])
-        p['p_dup']       = float(p_dup[i])
+        p['p_dup_sigma']   = float(p_dup_sigma[i])
+        p['p_dup_r']       = float(p_dup_r[i])
+        p['p_dup_raw']     = float(p_dup_raw[i])
+        p['p_dup']         = float(p_dup[i])
         p['length_capped'] = bool(length_violation[i])
-        p['z']           = float(stats['z'][i])
+        p['events_capped'] = bool(events_violation[i])
+        p['z']             = float(stats['z'][i])
 
     order = np.argsort(scores)
     n99 = int((p_dup > 0.99).sum())
