@@ -78,6 +78,64 @@ def _pair_score(a, b, interior_start, interior_end):
     return float(np.std(ta[:n][mask] - tb[:n][mask]))
 
 
+def _compute_pair_metrics_batch(files, interior_start, interior_end, min_samples=50):
+    """Vectorized pair-metric computation. For N files this scales as O(N²·S)
+    via two matmuls instead of O(N²) Python loops, so 864-file runs go from
+    hours to seconds.
+
+    Returns (sigma_matrix, r_matrix, valid_file_indices) where the matrices
+    are indexed by position within `valid_file_indices` (NOT the original
+    `files` list). σ is computed on raw traces; r on detrended traces.
+    """
+    interior = []
+    valid_idx = []
+    for i, f in enumerate(files):
+        ta, pa = f['trace'], f['pos']
+        n = len(ta)
+        mask = (pa[:n] > interior_start) & (pa[:n] < interior_end)
+        if mask.sum() < min_samples:
+            continue
+        interior.append((ta[mask].astype(np.float32),
+                         pa[mask].astype(np.float32)))
+        valid_idx.append(i)
+    if len(interior) < 2:
+        return None
+
+    N = min(len(d[0]) for d in interior)
+    K = len(interior)
+    M_raw = np.empty((K, N), dtype=np.float32)
+    M_det = np.empty((K, N), dtype=np.float32)
+    for k, (ts, ps) in enumerate(interior):
+        ts = ts[:N]; ps = ps[:N]
+        M_raw[k] = ts
+        # Detrend per-row: subtract best-fit linear (slope·pos + intercept).
+        # Closed-form: slope = cov(p, t) / var(p), intercept = mean(t) - slope·mean(p).
+        pm = ps.mean(); tm = ts.mean()
+        denom = ((ps - pm) ** 2).sum()
+        slope = float(((ps - pm) * (ts - tm)).sum() / denom) if denom > 0 else 0.0
+        intercept = float(tm - slope * pm)
+        M_det[k] = ts - (slope * ps + intercept)
+
+    # σ(M[i] - M[j]) for all pairs via the variance-decomposition identity:
+    #     var(A - B) = mean(A²) + mean(B²) - 2·E[A·B] - (E[A] - E[B])²
+    m1 = M_raw.mean(axis=1)
+    m2 = (M_raw.astype(np.float64) ** 2).mean(axis=1)
+    C = (M_raw.astype(np.float64) @ M_raw.astype(np.float64).T) / float(N)
+    var_ij = (m2[:, None] + m2[None, :] - 2.0 * C
+              - (m1[:, None] - m1[None, :]) ** 2)
+    sigma_matrix = np.sqrt(np.maximum(var_ij, 0.0))
+
+    # Pearson r on detrended traces. Detrended rows are mean-≈-0, but subtract
+    # to be exact. Then r_ij = (Mc @ Mc.T) / (N · std_i · std_j).
+    Mc = (M_det.astype(np.float64) - M_det.astype(np.float64).mean(axis=1, keepdims=True))
+    std = np.sqrt((Mc ** 2).mean(axis=1))
+    std_outer = np.outer(std, std)
+    np.maximum(std_outer, 1e-12, out=std_outer)
+    r_matrix = (Mc @ Mc.T) / (float(N) * std_outer)
+    np.clip(r_matrix, -1.0, 1.0, out=r_matrix)
+    return sigma_matrix, r_matrix, valid_idx
+
+
 def _pair_shape_r(a, b, interior_start, interior_end):
     """Detrended Pearson r in the interior window. r ≈ 1 → same fiber."""
     pa = a['pos']
@@ -256,15 +314,28 @@ def build_report_sor(folder, title, out_pdf):
     print(f'Interior window: {interior_start:.0f}–{interior_end:.0f} m  '
           f'(common span {min_L:.0f} m)')
 
+    print(f'Computing pair metrics for {len(files)} files '
+          f'({len(files) * (len(files) - 1) // 2} pairs)...')
+    batch = _compute_pair_metrics_batch(files, interior_start, interior_end)
+    if batch is None:
+        raise RuntimeError('No comparable pairs after interior masking')
+    sigma_matrix, r_matrix, valid_idx = batch
     pairs = []
-    for a, b in combinations(files, 2):
-        s = _pair_score(a, b, interior_start, interior_end)
-        if s is None:
-            continue
-        r = _pair_shape_r(a, b, interior_start, interior_end)
-        pairs.append({'a': a['name'], 'b': b['name'], 'score': s, 'shape_r': r})
+    K = len(valid_idx)
+    for ki in range(K):
+        i = valid_idx[ki]
+        name_i = files[i]['name']
+        for kj in range(ki + 1, K):
+            j = valid_idx[kj]
+            pairs.append({
+                'a': name_i,
+                'b': files[j]['name'],
+                'score': float(sigma_matrix[ki, kj]),
+                'shape_r': float(r_matrix[ki, kj]),
+            })
     if not pairs:
         raise RuntimeError('No comparable pairs after interior masking')
+    print(f'Pair metrics ready: {len(pairs)} pairs')
 
     scores = np.array([p['score'] for p in pairs], dtype=np.float64)
     p_dup_sigma, stats = _outlier_probability(scores)
