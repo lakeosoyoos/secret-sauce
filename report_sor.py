@@ -23,6 +23,7 @@ from report import (  # reuse helpers — all neutral
     _BASE_CSS, _embed_logo, _find_chrome, _outlier_probability,
     html_to_pdf_bytes, _fmt_time_gap, _detrend, _shape_color,
     _COLOR_HIGH, _COLOR_MID, _COLOR_LOW,
+    _event_match_quality, _events_agree,
 )
 
 _IOR = 1.4682
@@ -76,75 +77,6 @@ def _pair_score(a, b, interior_start, interior_end):
     if mask.sum() < 50:
         return None
     return float(np.std(ta[:n][mask] - tb[:n][mask]))
-
-
-def _event_match_quality(a_events, b_events, pos_tol_m=100.0):
-    """Greedy match interior splice/event detections by closest position.
-    Skips end-of-fiber and very-near-launch (< 10 m) events.
-
-    Returns (n_matched, n_max_events, n_min_events, mean_dloss_db). When
-    n_min_events < 3 the metric isn't meaningful — caller should treat as
-    'agree' by default.
-    """
-    def _interior(events):
-        out = []
-        for e in events or []:
-            if e.get('is_end'):
-                continue
-            d = e.get('dist_km') or 0
-            if d < 0.01:
-                continue
-            out.append((d * 1000.0, e.get('splice_loss') or 0.0))
-        return out
-
-    a = _interior(a_events)
-    b = _interior(b_events)
-    if not a or not b:
-        return 0, 0, 0.0
-    used_b = [False] * len(b)
-    matched_dloss = []
-    for pa, la in a:
-        best_j = -1
-        best_d = pos_tol_m + 1.0
-        for j, (pb, _) in enumerate(b):
-            if used_b[j]:
-                continue
-            d = abs(pa - pb)
-            if d < best_d:
-                best_d = d
-                best_j = j
-        if best_j >= 0 and best_d <= pos_tol_m:
-            matched_dloss.append(abs(la - b[best_j][1]))
-            used_b[best_j] = True
-    n_match = len(matched_dloss)
-    n_max = max(len(a), len(b))
-    n_min = min(len(a), len(b))
-    mean_dloss_db = float(np.mean(matched_dloss)) if matched_dloss else 0.0
-    return n_match, n_max, n_min, mean_dloss_db
-
-
-def _events_agree(n_match, n_max, n_min, mean_dloss_db,
-                  min_count=3, frac_thresh=0.85, loss_thresh_db=0.010):
-    """Return True iff the pair's events look like the same physical fiber.
-
-    Calibrated against measured-truth datasets:
-      - True same-fiber re-shoots: 100% match rate, mean |Δloss| ~1 mdB,
-        equal event counts.
-      - Different fibers in the same cable (DURSAN-style): 25-90% match
-        rate, mean |Δloss| 10-40 mdB, asymmetric event counts.
-
-    Default thresholds:
-      - at least 3 matched events
-      - ≥ 85% of the LONGER event list matched (penalizes asymmetric counts;
-        a real duplicate detects the same splices in both shots)
-      - mean loss difference ≤ 10 mdB (true dups are <2 mdB; this is
-        generously above noise but catches splice-aligned non-duplicates)
-    """
-    if n_min < min_count or n_max == 0:
-        return True  # too few events to evaluate — don't penalize
-    return (n_match >= min_count
-            and n_match / n_max >= frac_thresh
-            and mean_dloss_db <= loss_thresh_db)
 
 
 def _compute_pair_metrics_batch(files, interior_start, interior_end, min_samples=50):
@@ -440,9 +372,14 @@ def build_report_sor(folder, title, out_pdf):
     # their splice profiles look. Pairs with no length info pass through.
     LEN_CAP = 0.5
     def _len_tol_m(length_m):
+        # Tolerance accommodates launch-cable-swap systematic offsets (~5 m
+        # observed in real re-shoots) but still catches physically-different-
+        # fiber routing differences (typically tens to hundreds of meters
+        # when paths diverge at closures). The event filter does the
+        # fine-grained discrimination — length is just a coarse pre-filter.
         if length_m is None or length_m <= 0:
-            return 0.5
-        return max(0.5, min(2.0, length_m * 1e-4))
+            return 10.0
+        return max(10.0, length_m * 5e-4)
     length_deltas = np.array([(p.get('length_delta_m') or 0.0) for p in pairs], dtype=np.float64)
     has_lengths = np.array([p.get('length_delta_m') is not None for p in pairs])
     # Use the LONGER of the two fibers in the pair to set tolerance.

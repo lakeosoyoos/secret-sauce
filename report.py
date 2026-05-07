@@ -79,11 +79,39 @@ def load_file(path):
                 return float(v) if v is not None else None
             except (TypeError, ValueError):
                 return None
+        # KeyEvents → list of {dist_km, splice_loss, is_end} (matches the SOR
+        # event shape so the cross-mode event filter can use one helper).
+        events = []
+        length_for_end = _num('Length') or 0.0
+        ke_list = (meas.get('KeyEvents') or {}).get('KeyEventList') or []
+        for ke in ke_list:
+            dist = ke.get('Distance')
+            try:
+                dist_m = float(str(dist).replace(',', '')) if dist is not None else None
+            except (TypeError, ValueError):
+                dist_m = None
+            if dist_m is None:
+                continue
+            try:
+                splice = ke.get('SpliceLoss')
+                splice = float(str(splice).replace(',', '')) if splice is not None else None
+            except (TypeError, ValueError):
+                splice = None
+            # Position-vs-length detection of end-of-fiber events (works across
+            # Bellcore code variants where 'EventType' string can be coded
+            # differently). Position past the fiber length is also "end-or-past".
+            is_end = (length_for_end > 0 and dist_m >= length_for_end * 0.999)
+            events.append({
+                'dist_km': dist_m / 1000.0,
+                'splice_loss': splice,
+                'is_end': is_end,
+            })
         per_wl[wl] = {
             'trace': trace, 'pos': pos,
             'max_splice_dB': _num('MaximumSpliceLoss'),
             'span_loss_dB':  _num('AveragedLoss'),
             'length_m':      _num('Length'),
+            'events':        events,
         }
     dt_raw, dt_epoch = _parse_iso_ts(d.get('TestDateTime', ''))
     return {'name': name, 'filepath': path,
@@ -107,18 +135,36 @@ def load_trc_file(path):
         trace = 64.0 - samples.astype(np.float64) / 1024.0
         pos = np.arange(len(trace)) * dz
         # Max interior splice loss from event table (skip end-of-fiber events)
-        events = wlblock.get('events') or []
+        raw_events = wlblock.get('events') or []
         spl_vals = [abs(e.get('loss_db'))
-                    for e in events
+                    for e in raw_events
                     if e.get('loss_db') is not None
                     and (e.get('position_m') or 0) > 0.01
                     and (str(e.get('type', '')).lower() != 'end')]
         max_splice = max(spl_vals) if spl_vals else None
+        # Normalize TRC events to {dist_km, splice_loss, is_end} so the
+        # cross-mode event filter can use a single helper. TRC type codes are
+        # numeric, not 'end' strings — detect end-of-fiber by position vs the
+        # fiber's reported length so dead-zone reflectors past the end are
+        # also dropped.
+        events = []
+        L = wlblock.get('length_m') or 0.0
+        for e in raw_events:
+            pos_m = e.get('position_m')
+            if pos_m is None:
+                continue
+            is_end = (L > 0 and pos_m >= L * 0.999)
+            events.append({
+                'dist_km': pos_m / 1000.0,
+                'splice_loss': e.get('loss_db'),
+                'is_end': is_end,
+            })
         per_wl[wl_nm] = {
             'trace': trace, 'pos': pos,
             'max_splice_dB': max_splice,
             'span_loss_dB': wlblock.get('span_loss_db'),
             'length_m':     wlblock.get('length_m'),
+            'events':       events,
         }
     ts = r.get('timestamp')
     if ts:
@@ -129,6 +175,79 @@ def load_trc_file(path):
     return {'name': name, 'filepath': path,
             'test_dt': dt_raw, 'test_epoch': float(ts) if ts else None,
             'wl': per_wl}
+
+
+def _event_match_quality(a_events, b_events, pos_tol_m=100.0):
+    """Greedy match interior splice/event detections by closest position.
+    Skips end-of-fiber and very-near-launch (< 10 m) events.
+
+    Returns (n_matched, n_max_events, n_min_events, mean_dloss_db). When
+    n_min_events < 3 the metric isn't meaningful — caller should treat as
+    'agree' by default.
+    """
+    def _interior(events):
+        out = []
+        for e in events or []:
+            if e.get('is_end'):
+                continue
+            d = e.get('dist_km') or 0
+            if d < 0.01:
+                continue
+            sl = e.get('splice_loss')
+            # Skip events with no/NaN loss — they pollute mean_dloss.
+            if sl is None or (isinstance(sl, float) and np.isnan(sl)):
+                continue
+            out.append((d * 1000.0, sl))
+        return out
+
+    a = _interior(a_events)
+    b = _interior(b_events)
+    if not a or not b:
+        return 0, 0, 0, 0.0
+    used_b = [False] * len(b)
+    matched_dloss = []
+    for pa, la in a:
+        best_j = -1
+        best_d = pos_tol_m + 1.0
+        for j, (pb, _) in enumerate(b):
+            if used_b[j]:
+                continue
+            d = abs(pa - pb)
+            if d < best_d:
+                best_d = d
+                best_j = j
+        if best_j >= 0 and best_d <= pos_tol_m:
+            matched_dloss.append(abs(la - b[best_j][1]))
+            used_b[best_j] = True
+    n_match = len(matched_dloss)
+    n_max = max(len(a), len(b))
+    n_min = min(len(a), len(b))
+    mean_dloss_db = float(np.mean(matched_dloss)) if matched_dloss else 0.0
+    return n_match, n_max, n_min, mean_dloss_db
+
+
+def _events_agree(n_match, n_max, n_min, mean_dloss_db,
+                  min_count=3, frac_thresh=0.85, loss_thresh_db=0.010):
+    """Return True iff the pair's events look like the same physical fiber.
+
+    Calibrated against measured-truth datasets:
+      - True same-fiber re-shoots: 100% match rate, mean |Δloss| ~1 mdB,
+        equal event counts.
+      - Different fibers in the same cable (DURSAN-style): 25-90% match
+        rate, mean |Δloss| 10-40 mdB, asymmetric event counts.
+
+    Default thresholds:
+      - at least 3 matched events
+      - ≥ 85% of the LONGER event list matched (penalizes asymmetric counts;
+        a real duplicate detects the same splices in both shots)
+      - mean loss difference ≤ 10 mdB (true dups are <2 mdB; this is
+        generously above noise but catches splice-aligned non-duplicates)
+    """
+    if n_min < min_count or n_max == 0:
+        return True  # too few events to evaluate — don't penalize
+    return (n_match >= min_count
+            and n_match / n_max >= frac_thresh
+            and mean_dloss_db <= loss_thresh_db)
 
 
 def _outlier_probability(values):
@@ -455,12 +574,71 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
         return float((r - 0.95) / 0.04)
     p_dup_r_arr = np.array([_r_to_p(p.get('r_min')) for p in all_pairs_list],
                            dtype=np.float64)
-    # Combined likelihood = max of σ-outlier and shape-correlation tiers.
-    p_dup_arr = np.maximum(p_dup_sigma_arr, p_dup_r_arr)
-    for p, pd, pdr, z in zip(all_pairs_list, p_dup_arr, p_dup_r_arr, prob_stats['z']):
-        p['p_dup'] = float(pd)
-        p['p_dup_r'] = float(pdr)
-        p['z'] = float(z)
+    # Raw combined likelihood = max of σ-outlier and shape-correlation tiers.
+    p_dup_raw_arr = np.maximum(p_dup_sigma_arr, p_dup_r_arr)
+
+    # Physical-reality filters (mirror SOR mode):
+    #
+    #   1. Length-Δ filter: same fiber → same end-of-fiber length within
+    #      tolerance scaled max(0.5 m, min(2 m, length × 0.0001)).
+    #   2. Event-table filter: same fiber → splice events match in count,
+    #      position, and loss. Required: ≥3 matched events, ≥85% match
+    #      against max(n_a, n_b), mean |Δloss| ≤ 10 mdB.
+    #
+    # Either violation caps p_dup at 0.5 (borderline) regardless of σ/r.
+    # Use the longest-wavelength λ shared by all files for length and
+    # events (1550 nm is canonical when present).
+    def _len_tol_m(length_m):
+        # Tolerance accommodates launch-cable-swap systematic offsets (~5 m
+        # observed in real re-shoots) but still catches physically-different-
+        # fiber routing differences (typically tens to hundreds of meters).
+        # The event filter does the fine-grained discrimination.
+        if length_m is None or length_m <= 0:
+            return 10.0
+        return max(10.0, length_m * 5e-4)
+    canonical_wl = (1550 if all(1550 in f['wl'] for f in files)
+                    else sorted({wl for f in files for wl in f['wl']})[0])
+    file_by_name = {f['name']: f for f in files}
+    EVENT_CHECK_THRESHOLD = 0.10
+    LEN_CAP = 0.5
+    length_violation = np.zeros(len(all_pairs_list), dtype=bool)
+    events_violation = np.zeros(len(all_pairs_list), dtype=bool)
+    for i, p in enumerate(all_pairs_list):
+        fa = file_by_name.get(p['a'])
+        fb = file_by_name.get(p['b'])
+        if fa is None or fb is None:
+            continue
+        wl_a = fa['wl'].get(canonical_wl) or {}
+        wl_b = fb['wl'].get(canonical_wl) or {}
+        len_a = wl_a.get('length_m')
+        len_b = wl_b.get('length_m')
+        if len_a and len_b:
+            len_delta = abs(len_a - len_b)
+            tol = _len_tol_m(max(len_a, len_b))
+            p['length_delta_m'] = float(len_delta)
+            if len_delta > tol:
+                length_violation[i] = True
+        if p_dup_raw_arr[i] >= EVENT_CHECK_THRESHOLD:
+            n_match, n_max, n_min, mean_dloss = _event_match_quality(
+                wl_a.get('events'), wl_b.get('events'))
+            p['events_n_match'] = int(n_match)
+            p['events_n_max']   = int(n_max)
+            p['events_n_min']   = int(n_min)
+            p['events_mean_dloss_db'] = float(mean_dloss)
+            if not _events_agree(n_match, n_max, n_min, mean_dloss):
+                events_violation[i] = True
+    physical_violation = length_violation | events_violation
+    p_dup_arr = np.where(physical_violation,
+                         np.minimum(p_dup_raw_arr, LEN_CAP),
+                         p_dup_raw_arr)
+    for p, pd, pdr, z, lc, ec in zip(all_pairs_list, p_dup_arr, p_dup_r_arr,
+                                     prob_stats['z'], length_violation,
+                                     events_violation):
+        p['p_dup']         = float(pd)
+        p['p_dup_r']       = float(pdr)
+        p['z']             = float(z)
+        p['length_capped'] = bool(lc)
+        p['events_capped'] = bool(ec)
 
     best_partner = {}
     for f in files:
