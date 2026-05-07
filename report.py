@@ -181,9 +181,12 @@ def _event_match_quality(a_events, b_events, pos_tol_m=100.0):
     """Greedy match interior splice/event detections by closest position.
     Skips end-of-fiber and very-near-launch (< 10 m) events.
 
-    Returns (n_matched, n_max_events, n_min_events, mean_dloss_db). When
-    n_min_events < 3 the metric isn't meaningful — caller should treat as
-    'agree' by default.
+    Returns (n_matched, n_max_events, n_min_events, mean_dloss_db,
+    max_dloss_db). max_dloss_db is the For-Romeo-style 'max splice Δ at
+    matched events': for each splice closure that appears in both fibers,
+    compute |Δloss|, then take the max across matched closures. When
+    n_min_events < 3 the agreement metric isn't meaningful — caller should
+    treat as 'agree' by default.
     """
     def _interior(events):
         out = []
@@ -203,7 +206,7 @@ def _event_match_quality(a_events, b_events, pos_tol_m=100.0):
     a = _interior(a_events)
     b = _interior(b_events)
     if not a or not b:
-        return 0, 0, 0, 0.0
+        return 0, 0, 0, 0.0, 0.0
     used_b = [False] * len(b)
     matched_dloss = []
     for pa, la in a:
@@ -223,7 +226,8 @@ def _event_match_quality(a_events, b_events, pos_tol_m=100.0):
     n_max = max(len(a), len(b))
     n_min = min(len(a), len(b))
     mean_dloss_db = float(np.mean(matched_dloss)) if matched_dloss else 0.0
-    return n_match, n_max, n_min, mean_dloss_db
+    max_dloss_db = float(max(matched_dloss)) if matched_dloss else 0.0
+    return n_match, n_max, n_min, mean_dloss_db, max_dloss_db
 
 
 def _events_agree(n_match, n_max, n_min, mean_dloss_db,
@@ -619,14 +623,26 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
             if len_delta > tol:
                 length_violation[i] = True
         if p_dup_raw_arr[i] >= EVENT_CHECK_THRESHOLD:
-            n_match, n_max, n_min, mean_dloss = _event_match_quality(
+            # Canonical-λ event-match for the agree decision...
+            n_match, n_max, n_min, mean_dloss, max_dloss = _event_match_quality(
                 wl_a.get('events'), wl_b.get('events'))
             p['events_n_match'] = int(n_match)
             p['events_n_max']   = int(n_max)
             p['events_n_min']   = int(n_min)
             p['events_mean_dloss_db'] = float(mean_dloss)
+            p['events_max_dloss_db']  = float(max_dloss)
             if not _events_agree(n_match, n_max, n_min, mean_dloss):
                 events_violation[i] = True
+            # ...plus per-λ max-Δ at matched events for the detail-table cells.
+            max_dloss_per_wl = {}
+            for wl in (fa.get('wl') or {}).keys():
+                wa_events = (fa['wl'].get(wl) or {}).get('events')
+                wb_events = (fb['wl'].get(wl) or {}).get('events')
+                if wa_events is None or wb_events is None:
+                    continue
+                _, _, _, _, mxd = _event_match_quality(wa_events, wb_events)
+                max_dloss_per_wl[wl] = float(mxd)
+            p['events_max_dloss_per_wl'] = max_dloss_per_wl
     physical_violation = length_violation | events_violation
     p_dup_arr = np.where(physical_violation,
                          np.minimum(p_dup_raw_arr, LEN_CAP),
@@ -722,13 +738,14 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
         ms_cells = ''
         sl_cells = ''
         sr_cells = ''
+        max_dloss_map = p.get('events_max_dloss_per_wl') or {}
         for wl in WL_ORDER:
-            a_ms = fa['wl'].get(wl, {}).get('max_splice_dB')
-            b_ms = fb['wl'].get(wl, {}).get('max_splice_dB')
             a_sl = fa['wl'].get(wl, {}).get('span_loss_dB')
             b_sl = fb['wl'].get(wl, {}).get('span_loss_dB')
-            if a_ms is not None and b_ms is not None:
-                ms_cells += f'<td class="center">{abs(a_ms - b_ms)*1000:.0f}</td>'
+            # For-Romeo style: max |Δloss| across MATCHED events at this λ.
+            mxd = max_dloss_map.get(wl)
+            if mxd is not None and mxd > 0:
+                ms_cells += f'<td class="center">{mxd*1000:.0f}</td>'
             else:
                 ms_cells += '<td class="center na">—</td>'
             if a_sl is not None and b_sl is not None:

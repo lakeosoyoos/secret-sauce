@@ -402,12 +402,13 @@ def build_report_sor(folder, title, out_pdf):
     for i, p in enumerate(pairs):
         if p_dup_raw[i] < EVENT_CHECK_THRESHOLD:
             continue
-        n_match, n_max, n_min, mean_dloss = _event_match_quality(
+        n_match, n_max, n_min, mean_dloss, max_dloss = _event_match_quality(
             file_events.get(p['a']), file_events.get(p['b']))
         p['events_n_match'] = int(n_match)
         p['events_n_max']   = int(n_max)
         p['events_n_min']   = int(n_min)
         p['events_mean_dloss_db'] = float(mean_dloss)
+        p['events_max_dloss_db']  = float(max_dloss)
         if not _events_agree(n_match, n_max, n_min, mean_dloss):
             events_violation[i] = True
 
@@ -511,10 +512,14 @@ def build_report_sor(folder, title, out_pdf):
             continue
         ta, tb = fa.get('timestamp'), fb.get('timestamp')
         gap_str = _fmt_time_gap(abs(ta - tb)) if ta and tb else '—'
-        a_ms, b_ms = fa.get('max_splice_dB'), fb.get('max_splice_dB')
         a_sl, b_sl = fa.get('loss'), fb.get('loss')
-        ms_cell = (f'<td class="center">{abs(a_ms - b_ms)*1000:.0f}</td>'
-                   if a_ms is not None and b_ms is not None
+        # Max splice Δ at MATCHED events (For-Romeo style): for each splice
+        # closure that exists in both fibers, |Δloss|, then max across closures.
+        # Falls back to '—' when no events were matched.
+        max_dloss = p.get('events_max_dloss_db')
+        n_match_pair = p.get('events_n_match', 0)
+        ms_cell = (f'<td class="center">{max_dloss*1000:.0f}</td>'
+                   if max_dloss is not None and n_match_pair >= 1
                    else '<td class="center na">—</td>')
         sl_cell = (f'<td class="center">{abs(a_sl - b_sl)*1000:.0f}</td>'
                    if a_sl is not None and b_sl is not None
