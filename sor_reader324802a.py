@@ -469,31 +469,27 @@ def direction_key_from_genparams(filepath):
     """Build a stable grouping key from a SOR file's internal metadata.
 
     The key is a compound of every present signal so that pairs that share
-    a label but differ in OTDR (the typical bidirectional setup where each
-    end has its own OTDR) end up in separate groups:
+    a label end up in the same group regardless of OTDR identity, so two
+    shots of the same fiber from different OTDR units can be compared
+    against each other:
 
       location_a → location_b   (when both populated)
-      operator                   (when populated)
-      OTDR serial number         (always preferred over operator alone)
 
-    Returns '' when the file carries nothing useful — caller should fall
-    back to the filename in that case.
+    OTDR serial number and operator are intentionally NOT in the key —
+    different OTDRs / crews shooting the same direction should land in the
+    same report and be paired. Forward vs reverse separation comes from
+    the location pair; when those are empty the caller falls back to the
+    filename prefix (which usually encodes direction).
+
+    Returns '' when the file carries no location info — caller should
+    fall back to the filename in that case.
     """
     gp = parse_gen_params(filepath)
     a = (gp.get('location_a') or '').strip()
     b = (gp.get('location_b') or '').strip()
-    op = (gp.get('operator') or '').strip()
-    sn = (gp.get('serial_number') or '').strip()
-    parts = []
     if a or b:
-        parts.append(f'{a}_to_{b}')
-    if op and sn:
-        parts.append(f'{op}_sn{sn}')
-    elif sn:
-        parts.append(f'sn{sn}')
-    elif op:
-        parts.append(op)
-    return '__'.join(parts)
+        return f'{a}_to_{b}'
+    return ''
 
 
 def parse_sor_full(filepath, trim=True):
