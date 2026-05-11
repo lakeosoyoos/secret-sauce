@@ -430,13 +430,22 @@ def build_report_sor(folder, title, out_pdf):
     n10 = int((p_dup > 0.1).sum())
     print(f'Likelihood >99%: {n99}   >50%: {n50}   >10%: {n10}')
 
+    # For each file, pick the partner that gives the HIGHEST duplicate
+    # likelihood (tie-broken by smallest disagreement). This ensures the
+    # per-file table is symmetric: if pair (A,B) is the most-likely
+    # duplicate for both A and B, both rows point at each other. Earlier
+    # logic picked by smallest σ alone, which could leave a confirmed-
+    # duplicate flag on one row while the partner's row pointed elsewhere.
     best_partner = {}
     for idx, f in enumerate(files):
         best = None
         for p in pairs:
             if f['name'] not in (p['a'], p['b']):
                 continue
-            if best is None or p['score'] < best['score']:
+            if best is None:
+                best = p
+            elif (p['p_dup'] > best['p_dup']
+                  or (p['p_dup'] == best['p_dup'] and p['score'] < best['score'])):
                 best = p
         best_partner[f['name']] = best
 

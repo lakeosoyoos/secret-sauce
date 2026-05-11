@@ -656,14 +656,22 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
         p['length_capped'] = bool(lc)
         p['events_capped'] = bool(ec)
 
+    # For each file, pick the partner that gives the HIGHEST duplicate
+    # likelihood (tie-broken by smallest combined disagreement). Symmetric
+    # by construction: if pair (A,B) is the most-likely duplicate for both
+    # files, both rows in the per-file table point at each other.
     best_partner = {}
     for f in files:
         best = None
         for g in files:
             if g['name'] == f['name']: continue
             p = pair_lookup[tuple(sorted([f['name'], g['name']]))]
-            if best is None or p['sum_score'] < best['sum_score']:
-                best = {'partner': g['name'], 'sum_score': p['sum_score'], 'pair': p}
+            cand = {'partner': g['name'], 'sum_score': p['sum_score'],
+                    'p_dup': p['p_dup'], 'pair': p}
+            if (best is None
+                or cand['p_dup'] > best['p_dup']
+                or (cand['p_dup'] == best['p_dup'] and cand['sum_score'] < best['sum_score'])):
+                best = cand
         best_partner[f['name']] = best
 
     dup_pairs = [p for p in all_pairs_list
@@ -690,7 +698,10 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
     for f in sorted(files, key=lambda x: x['name']):
         bp = best_partner[f['name']]
         partner = bp['partner']
-        is_dup = f['name'] in dup_names
+        # Verdict reads from the best-partner pair's combined likelihood,
+        # so a file flagged as DUPLICATE by its best pair stays consistent
+        # with that pair's row in the confirmed-duplicate table.
+        is_dup = bp['pair']['p_dup'] > 0.5
         verdict_html = (f'<td class="center"><span class="dup">DUPLICATE of {partner}</span></td>'
                         if is_dup else
                         f'<td class="center"><span class="na">unique (closest: {partner})</span></td>')
