@@ -291,7 +291,11 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
     return base64.b64encode(buf.read()).decode('ascii')
 
 
-def build_report_sor(folder, title, out_pdf):
+def _analyze_sor(folder):
+    """Shared SOR analysis: load files, compute pair metrics, apply
+    physical-reality filters, pick best partners. Returns a dict the
+    PDF and XLSX renderers can both consume.
+    """
     paths = sorted(glob.glob(os.path.join(folder, '*.sor')))
     files = []
     for p in paths:
@@ -307,9 +311,6 @@ def build_report_sor(folder, title, out_pdf):
     interior_start = _LAUNCH_SKIP_M
     interior_end = min_L - _END_BUFFER_M
     if interior_end - interior_start < 100:
-        # Short-fiber fallback: scale the window to the span itself.
-        # 2 m floor keeps the launch buffer sane for coils under 50 m; for
-        # anything longer, 5% of the span is plenty.
         interior_start = max(2.0, min_L * 0.05)
         interior_end = max(interior_start + 2.0, min_L * 0.95)
     print(f'Interior window: {interior_start:.0f}–{interior_end:.0f} m  '
@@ -448,6 +449,31 @@ def build_report_sor(folder, title, out_pdf):
                   or (p['p_dup'] == best['p_dup'] and p['score'] < best['score'])):
                 best = p
         best_partner[f['name']] = best
+
+    return {
+        'files': files,
+        'pairs': pairs,
+        'scores': scores,
+        'stats': stats,
+        'p_dup': p_dup,
+        'best_partner': best_partner,
+        'n99': n99, 'n50': n50, 'n10': n10,
+        'interior_start': interior_start, 'interior_end': interior_end,
+        'min_L': min_L,
+        'order_by_score': order,
+    }
+
+
+def build_report_sor(folder, title, out_pdf):
+    analysis = _analyze_sor(folder)
+    files = analysis['files']
+    pairs = analysis['pairs']
+    scores = analysis['scores']
+    stats = analysis['stats']
+    p_dup = analysis['p_dup']
+    best_partner = analysis['best_partner']
+    n99, n50, n10 = analysis['n99'], analysis['n50'], analysis['n10']
+    order = analysis['order_by_score']
 
     verdict_block = (f'<div class="verdict-box verdict-confirm">'
                      f'<b>{n50} duplicate pair(s) identified</b> at ≥50% likelihood; '
@@ -645,13 +671,196 @@ def run_sor_bytes(folder, title):
     return pdf_bytes, n_files, n_pairs
 
 
+def build_xlsx_sor(folder, title, out_xlsx):
+    """SOR-mode Excel renderer. Same analysis as build_report_sor, but
+    output is an .xlsx workbook with one sheet per table (no rendered
+    charts — Excel users typically filter / sort the raw numbers).
+
+    Sheets:
+      Summary                — header counts and verdict
+      Per-file verdict
+      Confirmed duplicates   — pairs at ≥50% likelihood, with detail columns
+      Top 30 — lowest disagreement
+      Top 30 — highest similarity
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    analysis = _analyze_sor(folder)
+    files = analysis['files']
+    pairs = analysis['pairs']
+    best_partner = analysis['best_partner']
+    n99, n50, n10 = analysis['n99'], analysis['n50'], analysis['n10']
+    order = analysis['order_by_score']
+
+    wb = Workbook()
+
+    # ---------- Summary ----------
+    ws = wb.active
+    ws.title = 'Summary'
+    bold = Font(bold=True)
+    hdr_fill = PatternFill('solid', fgColor='2C3E50')
+    hdr_font = Font(bold=True, color='FFFFFF')
+
+    ws['A1'] = title
+    ws['A1'].font = Font(bold=True, size=14)
+    ws['A2'] = f'Generated {datetime.now().strftime("%Y-%m-%d %H:%M")}'
+
+    rows = [
+        ('Files', len(files)),
+        ('Pairs', len(pairs)),
+        ('Likelihood ≥ 99%', n99),
+        ('Likelihood ≥ 50%', n50),
+        ('Likelihood ≥ 10%', n10),
+        ('Common span (m)', f'{analysis["min_L"]:.1f}'),
+        ('Interior window (m)',
+         f'{analysis["interior_start"]:.0f}–{analysis["interior_end"]:.0f}'),
+    ]
+    for i, (k, v) in enumerate(rows, start=4):
+        ws.cell(row=i, column=1, value=k).font = bold
+        ws.cell(row=i, column=2, value=v)
+    ws.column_dimensions['A'].width = 22
+    ws.column_dimensions['B'].width = 24
+
+    def _write_table(ws, headers, rows_data, col_widths=None):
+        for c, h in enumerate(headers, start=1):
+            cell = ws.cell(row=1, column=c, value=h)
+            cell.fill = hdr_fill
+            cell.font = hdr_font
+            cell.alignment = Alignment(horizontal='center')
+        for r, row in enumerate(rows_data, start=2):
+            for c, v in enumerate(row, start=1):
+                ws.cell(row=r, column=c, value=v)
+        ws.freeze_panes = 'A2'
+        ws.auto_filter.ref = (f'A1:{get_column_letter(len(headers))}'
+                              f'{1 + len(rows_data)}')
+        if col_widths:
+            for c, w in enumerate(col_widths, start=1):
+                ws.column_dimensions[get_column_letter(c)].width = w
+
+    # ---------- Per-file verdict ----------
+    ws = wb.create_sheet('Per-file verdict')
+    headers = ['File', 'Length (km)', 'Span loss (dB)',
+               'Lowest disagreement', 'Duplicate likelihood (%)',
+               'Similarity', 'Best partner', 'Verdict']
+    rows_data = []
+    for f in sorted(files, key=lambda x: x['name']):
+        bp = best_partner.get(f['name'])
+        if bp is None:
+            rows_data.append([f['name'], None, None, None, None, None, None, '—'])
+            continue
+        partner = bp['b'] if bp['a'] == f['name'] else bp['a']
+        verdict = (f'DUPLICATE of {partner}' if bp['p_dup'] > 0.5
+                   else f'unique (closest: {partner})')
+        rows_data.append([
+            f['name'],
+            (f['length'] / 1000.0) if f.get('length') else None,
+            f.get('loss'),
+            bp['score'],
+            bp['p_dup'] * 100.0,
+            bp.get('shape_r'),
+            partner,
+            verdict,
+        ])
+    _write_table(ws, headers, rows_data,
+                 col_widths=[18, 12, 14, 18, 22, 12, 20, 32])
+
+    # ---------- Confirmed duplicates (≥50% likelihood) ----------
+    ws = wb.create_sheet('Confirmed duplicates')
+    headers = ['Pair A', 'Pair B', 'Time gap (s)',
+               'Max splice Δ at matched events (mdB)',
+               'Span loss Δ (mdB)', 'Similarity', 'Same OTDR',
+               'Duplicate likelihood (%)']
+    file_by_name = {f['name']: f for f in files}
+    dup_sorted = sorted([p for p in pairs if p['p_dup'] > 0.5],
+                        key=lambda q: -q['p_dup'])
+    rows_data = []
+    for p in dup_sorted:
+        fa = file_by_name.get(p['a'])
+        fb = file_by_name.get(p['b'])
+        ta, tb = (fa.get('timestamp') if fa else None,
+                  fb.get('timestamp') if fb else None)
+        gap = abs(ta - tb) if ta and tb else None
+        a_sl = fa.get('loss') if fa else None
+        b_sl = fb.get('loss') if fb else None
+        sl_d = abs(a_sl - b_sl) * 1000 if a_sl is not None and b_sl is not None else None
+        max_d = p.get('events_max_dloss_db')
+        ms_d = max_d * 1000 if (max_d is not None and p.get('events_n_match', 0) >= 1) else None
+        sn_a = fa.get('serial_number') if fa else None
+        sn_b = fb.get('serial_number') if fb else None
+        if sn_a and sn_b:
+            same_sn = 'Yes' if sn_a == sn_b else 'No'
+        else:
+            same_sn = '—'
+        rows_data.append([
+            p['a'], p['b'], gap, ms_d, sl_d,
+            p.get('shape_r'), same_sn, p['p_dup'] * 100.0,
+        ])
+    _write_table(ws, headers, rows_data,
+                 col_widths=[18, 18, 13, 32, 18, 12, 11, 22])
+
+    # ---------- Top 30 — lowest disagreement ----------
+    ws = wb.create_sheet('Top 30 lowest disagreement')
+    headers = ['Rank', 'Pair A', 'Pair B', 'Level of disagreement',
+               'Duplicate likelihood (%)', 'Similarity']
+    rows_data = []
+    for rank, k in enumerate(order[:30], 1):
+        p = pairs[k]
+        rows_data.append([
+            rank, p['a'], p['b'], p['score'],
+            p['p_dup'] * 100.0, p.get('shape_r'),
+        ])
+    _write_table(ws, headers, rows_data,
+                 col_widths=[6, 18, 18, 22, 22, 12])
+
+    # ---------- Top 30 — highest similarity ----------
+    ws = wb.create_sheet('Top 30 highest similarity')
+    headers = ['Rank', 'Pair A', 'Pair B', 'Similarity',
+               'Level of disagreement', 'Duplicate likelihood (%)']
+    sim_sorted = sorted([(i, p) for i, p in enumerate(pairs)
+                         if p.get('shape_r') is not None],
+                        key=lambda x: -x[1]['shape_r'])[:30]
+    rows_data = []
+    for rank, (_, p) in enumerate(sim_sorted, 1):
+        rows_data.append([
+            rank, p['a'], p['b'], p['shape_r'],
+            p['score'], p['p_dup'] * 100.0,
+        ])
+    _write_table(ws, headers, rows_data,
+                 col_widths=[6, 18, 18, 12, 22, 22])
+
+    wb.save(out_xlsx)
+    print(f'XLSX: {out_xlsx}')
+    return out_xlsx
+
+
+def run_sor_xlsx_bytes(folder, title):
+    """Run SOR mode and return (xlsx_bytes, n_files, n_pairs)."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = os.path.join(td, 'report.xlsx')
+        build_xlsx_sor(folder, title, tmp)
+        with open(tmp, 'rb') as fh:
+            xlsx_bytes = fh.read()
+    n_files = len(glob.glob(os.path.join(folder, '*.sor')))
+    n_pairs = n_files * (n_files - 1) // 2
+    return xlsx_bytes, n_files, n_pairs
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--sor-dir', required=True)
     parser.add_argument('--title', required=True)
-    parser.add_argument('--out-pdf', required=True)
+    parser.add_argument('--out-pdf', help='Path for PDF output')
+    parser.add_argument('--out-xlsx', help='Path for XLSX output')
     args = parser.parse_args()
-    build_report_sor(args.sor_dir, args.title, args.out_pdf)
+    if args.out_pdf:
+        build_report_sor(args.sor_dir, args.title, args.out_pdf)
+    if args.out_xlsx:
+        build_xlsx_sor(args.sor_dir, args.title, args.out_xlsx)
+    if not args.out_pdf and not args.out_xlsx:
+        parser.error('Specify at least one of --out-pdf or --out-xlsx')
 
 
 if __name__ == '__main__':

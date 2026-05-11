@@ -21,7 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from report import run_json_bytes, run_trc_bytes
-from report_sor import run_sor_bytes
+from report_sor import run_sor_bytes, run_sor_xlsx_bytes
 from sor_reader324802a import direction_key_from_genparams
 
 
@@ -69,6 +69,14 @@ uploads = st.file_uploader(
     type=["sor", "trc", "json", "zip"],
     accept_multiple_files=True,
     key=f"uploader_{st.session_state['uploader_key']}",
+)
+
+output_format = st.radio(
+    "Output format",
+    options=["PDF", "Excel (xlsx)"],
+    horizontal=True,
+    help="PDF is the polished report with charts. Excel gives one sheet "
+         "per table, ready to filter and sort.",
 )
 
 if st.button("Clear uploads", type="secondary"):
@@ -187,20 +195,28 @@ if sor_files:
         col.markdown(f"**{prefix}**")
         col.metric("Files", len(paths))
 
+    want_xlsx = output_format.startswith("Excel")
+    ext = "xlsx" if want_xlsx else "pdf"
     for prefix, paths in groups.items():
         subdir = _copy_to_subdir(paths, os.path.join(tmp_dir, f"sor_{prefix}"))
         title = (f"Secret Sauce — {prefix}" if len(groups) > 1
                  else "Secret Sauce — Duplicate Classification")
-        fname = (f"report_{prefix}.pdf" if len(groups) > 1 else "report.pdf")
+        fname = (f"report_{prefix}.{ext}" if len(groups) > 1
+                 else f"report.{ext}")
         with st.spinner(f"Running {prefix} ({len(paths)} files)…"):
             try:
-                pdf_bytes, n_files, n_pairs = run_sor_bytes(subdir, title)
+                if want_xlsx:
+                    out_bytes, n_files, n_pairs = run_sor_xlsx_bytes(subdir, title)
+                else:
+                    out_bytes, n_files, n_pairs = run_sor_bytes(subdir, title)
             except Exception as e:
                 st.error(f"{prefix}: {e}")
                 continue
-        reports.append((fname, pdf_bytes, n_files, n_pairs, prefix))
+        reports.append((fname, out_bytes, n_files, n_pairs, prefix))
 elif trc_files:
     subdir = _copy_to_subdir(trc_files, os.path.join(tmp_dir, "trc_input"))
+    if output_format.startswith("Excel"):
+        st.warning("Excel output is currently SOR-only — TRC mode will produce a PDF.")
     with st.spinner(f"Running Secret Sauce on {len(trc_files)} TRC files…"):
         try:
             pdf_bytes, n_files, n_pairs = run_trc_bytes(
@@ -211,6 +227,8 @@ elif trc_files:
     reports.append(("report.pdf", pdf_bytes, n_files, n_pairs, "TRC"))
 else:
     subdir = _copy_to_subdir(json_files, os.path.join(tmp_dir, "json_input"))
+    if output_format.startswith("Excel"):
+        st.warning("Excel output is currently SOR-only — JSON mode will produce a PDF.")
     with st.spinner(f"Running Secret Sauce on {len(json_files)} JSON files…"):
         try:
             pdf_bytes, n_files, n_pairs = run_json_bytes(
@@ -234,20 +252,26 @@ for col, (_, _, n_files, n_pairs, label) in zip(cols, reports):
     col.metric("Pairs", n_pairs)
 
 
+def _mime_for(fname):
+    if fname.endswith(".xlsx"):
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return "application/pdf"
+
 if len(reports) == 1:
-    fname, pdf_bytes, _, _, _ = reports[0]
+    fname, out_bytes, _, _, _ = reports[0]
+    label = "Download Excel" if fname.endswith(".xlsx") else "Download PDF"
     st.download_button(
-        "Download PDF",
-        data=pdf_bytes,
+        label,
+        data=out_bytes,
         file_name=fname,
-        mime="application/pdf",
+        mime=_mime_for(fname),
         type="primary",
     )
 else:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fname, pdf_bytes, _, _, _ in reports:
-            zf.writestr(fname, pdf_bytes)
+        for fname, out_bytes, _, _, _ in reports:
+            zf.writestr(fname, out_bytes)
     buf.seek(0)
     st.download_button(
         "Download combined ZIP",
