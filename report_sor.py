@@ -697,16 +697,22 @@ def build_xlsx_sor(folder, title, out_xlsx):
 
     wb = Workbook()
 
+    # Unified font: Calibri 12 everywhere. Bold variant for headers and
+    # labels keeps the same size/family for visual consistency.
+    BASE = Font(name='Calibri', size=12)
+    BASE_BOLD = Font(name='Calibri', size=12, bold=True)
+    TITLE_FONT = Font(name='Calibri', size=14, bold=True)
+    HDR_FONT = Font(name='Calibri', size=12, bold=True, color='FFFFFF')
+    hdr_fill = PatternFill('solid', fgColor='2C3E50')
+
     # ---------- Summary ----------
     ws = wb.active
     ws.title = 'Summary'
-    bold = Font(bold=True)
-    hdr_fill = PatternFill('solid', fgColor='2C3E50')
-    hdr_font = Font(bold=True, color='FFFFFF')
 
     ws['A1'] = title
-    ws['A1'].font = Font(bold=True, size=14)
+    ws['A1'].font = TITLE_FONT
     ws['A2'] = f'Generated {datetime.now().strftime("%Y-%m-%d %H:%M")}'
+    ws['A2'].font = BASE
 
     rows = [
         ('Files', len(files)),
@@ -719,8 +725,8 @@ def build_xlsx_sor(folder, title, out_xlsx):
          f'{analysis["interior_start"]:.0f}–{analysis["interior_end"]:.0f}'),
     ]
     for i, (k, v) in enumerate(rows, start=4):
-        ws.cell(row=i, column=1, value=k).font = bold
-        ws.cell(row=i, column=2, value=v)
+        c1 = ws.cell(row=i, column=1, value=k); c1.font = BASE_BOLD
+        c2 = ws.cell(row=i, column=2, value=v); c2.font = BASE
     ws.column_dimensions['A'].width = 22
     ws.column_dimensions['B'].width = 24
 
@@ -728,11 +734,12 @@ def build_xlsx_sor(folder, title, out_xlsx):
         for c, h in enumerate(headers, start=1):
             cell = ws.cell(row=1, column=c, value=h)
             cell.fill = hdr_fill
-            cell.font = hdr_font
+            cell.font = HDR_FONT
             cell.alignment = Alignment(horizontal='center')
         for r, row in enumerate(rows_data, start=2):
             for c, v in enumerate(row, start=1):
-                ws.cell(row=r, column=c, value=v)
+                cell = ws.cell(row=r, column=c, value=v)
+                cell.font = BASE
         ws.freeze_panes = 'A2'
         ws.auto_filter.ref = (f'A1:{get_column_letter(len(headers))}'
                               f'{1 + len(rows_data)}')
@@ -850,7 +857,7 @@ def build_xlsx_sor(folder, title, out_xlsx):
         img.height = int(target_w * orig_h / orig_w) if orig_w else target_w // 2
         ws = wb.create_sheet('Charts')
         ws['A1'] = 'Distribution charts'
-        ws['A1'].font = Font(bold=True, size=14)
+        ws['A1'].font = TITLE_FONT
         ws.add_image(img, 'A3')
     except Exception as exc:
         # Charts are nice-to-have — never fail the whole report on a render error.
