@@ -291,47 +291,6 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
     return base64.b64encode(buf.read()).decode('ascii')
 
 
-def _reflective_only_events(file_dict, splice_thresh_db=0.020, pos_thresh_m=100.0):
-    """Find in-fiber events that reflect but have ~zero loss.
-
-    Rule: is_reflective AND |splice_loss| ≤ 20 mdB AND position > 100 m
-    AND not end-of-fiber. Catches ghost reflections (open mechanical
-    splices, dirty UPC connectors mid-span, fiber-bend microcracks with
-    reflective faces) that the OTDR sees as reflective events but doesn't
-    register as measurable attenuation.
-    """
-    out = []
-    name = file_dict.get('name', '?')
-    length_m = file_dict.get('length') or 0.0
-    for e in file_dict.get('events') or []:
-        if not e.get('is_reflective'):
-            continue
-        if e.get('is_end'):
-            continue
-        pos_km = e.get('dist_km')
-        if pos_km is None:
-            continue
-        pos_m = pos_km * 1000.0
-        if pos_m < pos_thresh_m:
-            continue
-        # Skip events at-or-past the fiber's reported length (dead-zone
-        # reflectors past the EOF, sometimes left by acquisition range).
-        if length_m > 0 and pos_m >= length_m * 0.999:
-            continue
-        sl = e.get('splice_loss')
-        if sl is None:
-            sl = 0.0
-        if abs(sl) > splice_thresh_db:
-            continue
-        out.append({
-            'file': name,
-            'pos_km': float(pos_km),
-            'reflection_db': e.get('reflection'),
-            'splice_loss_db': float(sl),
-        })
-    return out
-
-
 def _analyze_sor(folder):
     """Shared SOR analysis: load files, compute pair metrics, apply
     physical-reality filters, pick best partners. Returns a dict the
@@ -491,14 +450,6 @@ def _analyze_sor(folder):
                 best = p
         best_partner[f['name']] = best
 
-    # Reflective-without-loss anomaly detection (per file).
-    refl_only_per_file = {}
-    refl_only_flat = []
-    for f in files:
-        evts = _reflective_only_events(f)
-        refl_only_per_file[f['name']] = evts
-        refl_only_flat.extend(evts)
-
     return {
         'files': files,
         'pairs': pairs,
@@ -510,8 +461,6 @@ def _analyze_sor(folder):
         'interior_start': interior_start, 'interior_end': interior_end,
         'min_L': min_L,
         'order_by_score': order,
-        'refl_only_per_file': refl_only_per_file,
-        'refl_only_flat': refl_only_flat,
     }
 
 
@@ -536,7 +485,6 @@ def build_report_sor(folder, title, out_pdf):
     shape_rs = [p.get('shape_r') for p in pairs]
     dist_chart = _distribution_chart(scores, p_dup, stats, shape_rs=shape_rs)
 
-    refl_per_file = analysis.get('refl_only_per_file') or {}
     file_rows = ''
     for f in sorted(files, key=lambda x: x['name']):
         bp = best_partner.get(f['name'])
@@ -552,14 +500,9 @@ def build_report_sor(folder, title, out_pdf):
         r_val = bp.get('shape_r')
         r_cell = ('<td class="center na">—</td>' if r_val is None else
                   f'<td class="center" style="color:{_shape_color(r_val)};font-weight:600">{r_val:.4f}</td>')
-        n_refl = len(refl_per_file.get(f['name']) or [])
-        refl_cell = (f'<td class="center" style="color:#c0392b;font-weight:700">{n_refl}</td>'
-                     if n_refl > 0 else
-                     '<td class="center na">0</td>')
         file_rows += (f'<tr><td class="pair-cell">{f["name"]}</td>'
                       f'<td class="center">{f["length"]/1000:.3f}</td>'
                       f'<td class="center">{loss_cell}</td>'
-                      f'{refl_cell}'
                       f'<td class="center">{bp["score"]:.4f}</td>'
                       f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td>'
                       f'{r_cell}'
@@ -649,34 +592,6 @@ def build_report_sor(folder, title, out_pdf):
 </div>
 '''
 
-    # ---------- Reflective without loss (anomaly section) ----------
-    refl_flat = analysis.get('refl_only_flat') or []
-    refl_block = ''
-    if refl_flat:
-        refl_rows = ''
-        for e in sorted(refl_flat, key=lambda x: (x['file'], x.get('pos_km') or 0)):
-            refl_rows += (f'<tr><td class="pair-cell">{e["file"]}</td>'
-                          f'<td class="center">{(e.get("pos_km") or 0):.4f}</td>'
-                          f'<td class="center">{(e.get("reflection_db") or 0):.2f}</td>'
-                          f'<td class="center">{(e.get("splice_loss_db") or 0)*1000:.1f}</td></tr>')
-        refl_block = f'''
-<div class="section-block">
-<div class="dir-banner">6. Reflective without loss</div>
-<div class="explanation">
-Events that reflect (is_reflective=True) but show ~zero splice loss
-(|Δloss| ≤ 20 mdB) in the OTDR firmware events table. Typical causes:
-open mechanical splices, dirty UPC connectors mid-span, microcracks
-with reflective faces. The OTDR sees them as reflections but doesn't
-register measurable attenuation — worth investigating.
-</div>
-<table class="vote-table">
-<tr><th style="text-align:left">File</th>
-    <th>Position (km)</th><th>Reflection (dB)</th><th>Splice loss (mdB)</th></tr>
-{refl_rows}
-</table>
-</div>
-'''
-
     generated = datetime.now().strftime('%Y-%m-%d %H:%M')
     html = f'''<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -709,7 +624,6 @@ register measurable attenuation — worth investigating.
 <table class="vote-table">
 <tr><th style="text-align:left">File</th>
     <th>Length (km)</th><th>Span loss (dB)</th>
-    <th>Refl. without loss</th>
     <th>lowest disagreement</th><th>Duplicate likelihood</th>
     <th>similarity</th><th>Verdict</th></tr>
 {file_rows}
@@ -735,8 +649,6 @@ register measurable attenuation — worth investigating.
 {sim_rows}
 </table>
 </div>
-
-{refl_block}
 </body></html>'''
 
     pdf_bytes = html_to_pdf_bytes(html, base_url=folder)
@@ -830,17 +742,13 @@ def build_xlsx_sor(folder, title, out_xlsx):
     # ---------- Per-file verdict ----------
     ws = wb.create_sheet('Per-file verdict')
     headers = ['File', 'Length (km)', 'Span loss (dB)',
-               'Refl. without loss', 'Lowest disagreement',
-               'Duplicate likelihood (%)', 'Similarity',
-               'Best partner', 'Verdict']
-    refl_per_file = analysis.get('refl_only_per_file') or {}
+               'Lowest disagreement', 'Duplicate likelihood (%)',
+               'Similarity', 'Best partner', 'Verdict']
     rows_data = []
     for f in sorted(files, key=lambda x: x['name']):
         bp = best_partner.get(f['name'])
-        n_refl = len(refl_per_file.get(f['name']) or [])
         if bp is None:
-            rows_data.append([f['name'], None, None, n_refl,
-                              None, None, None, None, '—'])
+            rows_data.append([f['name'], None, None, None, None, None, None, '—'])
             continue
         partner = bp['b'] if bp['a'] == f['name'] else bp['a']
         verdict = (f'DUPLICATE of {partner}' if bp['p_dup'] > 0.5
@@ -849,7 +757,6 @@ def build_xlsx_sor(folder, title, out_xlsx):
             f['name'],
             (f['length'] / 1000.0) if f.get('length') else None,
             f.get('loss'),
-            n_refl,
             bp['score'],
             bp['p_dup'] * 100.0,
             bp.get('shape_r'),
@@ -857,7 +764,7 @@ def build_xlsx_sor(folder, title, out_xlsx):
             verdict,
         ])
     _write_table(ws, headers, rows_data,
-                 col_widths=[18, 12, 14, 16, 18, 22, 12, 20, 32])
+                 col_widths=[18, 12, 14, 18, 22, 12, 20, 32])
 
     # ---------- Confirmed duplicates (≥50% likelihood) ----------
     ws = wb.create_sheet('Confirmed duplicates')
@@ -922,21 +829,6 @@ def build_xlsx_sor(folder, title, out_xlsx):
         ])
     _write_table(ws, headers, rows_data,
                  col_widths=[6, 18, 18, 12, 22, 22])
-
-    # ---------- Reflective without loss ----------
-    refl_flat = analysis.get('refl_only_flat') or []
-    ws = wb.create_sheet('Reflective without loss')
-    headers = ['File', 'Position (km)', 'Reflection (dB)', 'Splice loss (mdB)']
-    rows_data = []
-    for e in sorted(refl_flat, key=lambda x: (x['file'], x.get('pos_km') or 0)):
-        rows_data.append([
-            e.get('file'),
-            e.get('pos_km'),
-            e.get('reflection_db'),
-            (e.get('splice_loss_db') or 0) * 1000.0,
-        ])
-    _write_table(ws, headers, rows_data,
-                 col_widths=[18, 14, 16, 18])
 
     wb.save(out_xlsx)
     print(f'XLSX: {out_xlsx}')
