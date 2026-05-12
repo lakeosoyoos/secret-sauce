@@ -686,6 +686,7 @@ def build_xlsx_sor(folder, title, out_xlsx):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
+    from openpyxl.drawing.image import Image as XlsxImage
 
     analysis = _analyze_sor(folder)
     files = analysis['files']
@@ -829,6 +830,30 @@ def build_xlsx_sor(folder, title, out_xlsx):
         ])
     _write_table(ws, headers, rows_data,
                  col_widths=[6, 18, 18, 12, 22, 22])
+
+    # ---------- Charts ----------
+    # Generate the same 2x2 distribution chart used in the PDF and embed
+    # it on its own sheet so Excel users have the visual context too.
+    try:
+        shape_rs = [p.get('shape_r') for p in pairs]
+        chart_b64 = _distribution_chart(
+            analysis['scores'], analysis['p_dup'], analysis['stats'],
+            shape_rs=shape_rs)
+        png_bytes = base64.b64decode(chart_b64)
+        img_buf = BytesIO(png_bytes)
+        img = XlsxImage(img_buf)
+        # Scale to a sensible width; openpyxl uses pixel units (96 DPI).
+        # Matplotlib rendered at figsize (13, 6) at 150 dpi → ~1950x900 px.
+        # Shrink to width 1100 px (~ 11.5 in on screen) while preserving aspect.
+        img.width = 1100
+        img.height = int(1100 * (img.height / img.width)) if hasattr(img, 'width') else 510
+        ws = wb.create_sheet('Charts')
+        ws['A1'] = 'Distribution charts'
+        ws['A1'].font = Font(bold=True, size=14)
+        ws.add_image(img, 'A3')
+    except Exception as exc:
+        # Charts are nice-to-have — never fail the whole report on a render error.
+        print(f'  warn: skipped Charts sheet ({exc})')
 
     wb.save(out_xlsx)
     print(f'XLSX: {out_xlsx}')
