@@ -842,11 +842,12 @@ def build_xlsx_sor(folder, title, out_xlsx):
         png_bytes = base64.b64decode(chart_b64)
         img_buf = BytesIO(png_bytes)
         img = XlsxImage(img_buf)
-        # Scale to a sensible width; openpyxl uses pixel units (96 DPI).
-        # Matplotlib rendered at figsize (13, 6) at 150 dpi → ~1950x900 px.
-        # Shrink to width 1100 px (~ 11.5 in on screen) while preserving aspect.
-        img.width = 1100
-        img.height = int(1100 * (img.height / img.width)) if hasattr(img, 'width') else 510
+        # Matplotlib rendered at figsize (13, 6) at 150 dpi → ~1950×900 px
+        # native. Keep aspect ratio while scaling to a sensible Excel width.
+        orig_w, orig_h = img.width, img.height
+        target_w = 1400  # matches the PDF body's max content width
+        img.width = target_w
+        img.height = int(target_w * orig_h / orig_w) if orig_w else target_w // 2
         ws = wb.create_sheet('Charts')
         ws['A1'] = 'Distribution charts'
         ws['A1'].font = Font(bold=True, size=14)
