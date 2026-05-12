@@ -73,10 +73,10 @@ uploads = st.file_uploader(
 
 output_format = st.radio(
     "Output format",
-    options=["PDF", "Excel (xlsx)"],
+    options=["Excel (xlsx)", "PDF"],
     horizontal=True,
-    help="PDF is the polished report with charts. Excel gives one sheet "
-         "per table, ready to filter and sort.",
+    help="Excel gives one sheet per table, ready to filter and sort. "
+         "PDF is the polished report with charts.",
 )
 
 if st.button("Clear uploads", type="secondary"):
