@@ -291,41 +291,6 @@ def _distribution_chart(scores, p_dup, stats, shape_rs=None):
     return base64.b64encode(buf.read()).decode('ascii')
 
 
-def _bad_termination_events(file_dict, refl_thresh_db=-25.0):
-    """Find launch- or end-of-fiber events with strong reflection.
-
-    Threshold: reflection worse than −25 dB (i.e. closer to 0). Typical
-    well-terminated fiber ends sit at −45 to −60 dB; values in
-    (−25 dB, 0 dB) indicate bare glass-air Fresnel (no tailbox, no APC),
-    a dirty connector face, or a broken end.
-
-    Returns a list of dicts: file, position_km, reflection_db, location
-    where location is 'launch' (≈ 0 km) or 'end' (is_end=True).
-    """
-    out = []
-    name = file_dict.get('name', '?')
-    for e in file_dict.get('events') or []:
-        if not e.get('is_reflective'):
-            continue
-        refl = e.get('reflection')
-        if refl is None:
-            continue
-        # 'Worse than threshold' means closer to 0 → numerically greater than -25.
-        if refl <= refl_thresh_db:
-            continue
-        pos_km = e.get('dist_km') or 0
-        is_launch = (pos_km * 1000.0 < 50.0)  # within first 50 m → launch event
-        if not (is_launch or e.get('is_end')):
-            continue
-        out.append({
-            'file': name,
-            'pos_km': float(pos_km),
-            'reflection_db': float(refl),
-            'location': 'launch' if is_launch else 'end',
-        })
-    return out
-
-
 def _reflective_only_events(file_dict, splice_thresh_db=0.020, pos_thresh_m=100.0):
     """Find in-fiber events that reflect but have ~zero loss.
 
@@ -529,15 +494,10 @@ def _analyze_sor(folder):
     # Reflective-without-loss anomaly detection (per file).
     refl_only_per_file = {}
     refl_only_flat = []
-    bad_term_per_file = {}
-    bad_term_flat = []
     for f in files:
         evts = _reflective_only_events(f)
         refl_only_per_file[f['name']] = evts
         refl_only_flat.extend(evts)
-        term_evts = _bad_termination_events(f)
-        bad_term_per_file[f['name']] = term_evts
-        bad_term_flat.extend(term_evts)
 
     return {
         'files': files,
@@ -552,8 +512,6 @@ def _analyze_sor(folder):
         'order_by_score': order,
         'refl_only_per_file': refl_only_per_file,
         'refl_only_flat': refl_only_flat,
-        'bad_term_per_file': bad_term_per_file,
-        'bad_term_flat': bad_term_flat,
     }
 
 
@@ -579,7 +537,6 @@ def build_report_sor(folder, title, out_pdf):
     dist_chart = _distribution_chart(scores, p_dup, stats, shape_rs=shape_rs)
 
     refl_per_file = analysis.get('refl_only_per_file') or {}
-    term_per_file = analysis.get('bad_term_per_file') or {}
     file_rows = ''
     for f in sorted(files, key=lambda x: x['name']):
         bp = best_partner.get(f['name'])
@@ -599,14 +556,10 @@ def build_report_sor(folder, title, out_pdf):
         refl_cell = (f'<td class="center" style="color:#c0392b;font-weight:700">{n_refl}</td>'
                      if n_refl > 0 else
                      '<td class="center na">0</td>')
-        n_term = len(term_per_file.get(f['name']) or [])
-        term_cell = (f'<td class="center" style="color:#c0392b;font-weight:700">{n_term}</td>'
-                     if n_term > 0 else
-                     '<td class="center na">0</td>')
         file_rows += (f'<tr><td class="pair-cell">{f["name"]}</td>'
                       f'<td class="center">{f["length"]/1000:.3f}</td>'
                       f'<td class="center">{loss_cell}</td>'
-                      f'{refl_cell}{term_cell}'
+                      f'{refl_cell}'
                       f'<td class="center">{bp["score"]:.4f}</td>'
                       f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td>'
                       f'{r_cell}'
@@ -724,35 +677,6 @@ register measurable attenuation — worth investigating.
 </div>
 '''
 
-    # ---------- Bad terminations (anomaly section) ----------
-    term_flat = analysis.get('bad_term_flat') or []
-    term_block = ''
-    if term_flat:
-        term_rows = ''
-        for e in sorted(term_flat, key=lambda x: (x['file'], x.get('pos_km') or 0)):
-            term_rows += (f'<tr><td class="pair-cell">{e["file"]}</td>'
-                          f'<td class="center">{e.get("location","")}</td>'
-                          f'<td class="center">{(e.get("pos_km") or 0):.4f}</td>'
-                          f'<td class="center" style="color:#c0392b;font-weight:600">'
-                          f'{(e.get("reflection_db") or 0):.2f}</td></tr>')
-        term_block = f'''
-<div class="section-block">
-<div class="dir-banner">7. Bad terminations (launch / end)</div>
-<div class="explanation">
-Reflective events at the launch (≈ 0 km) or at end-of-fiber whose
-reflection level is worse than −25 dB. Well-terminated ends typically
-sit between −45 and −60 dB; values closer to 0 mean bare glass-air
-Fresnel (no tailbox, no APC adapter), a dirty connector face, or a
-broken / pinched end.
-</div>
-<table class="vote-table">
-<tr><th style="text-align:left">File</th>
-    <th>Location</th><th>Position (km)</th><th>Reflection (dB)</th></tr>
-{term_rows}
-</table>
-</div>
-'''
-
     generated = datetime.now().strftime('%Y-%m-%d %H:%M')
     html = f'''<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -785,7 +709,7 @@ broken / pinched end.
 <table class="vote-table">
 <tr><th style="text-align:left">File</th>
     <th>Length (km)</th><th>Span loss (dB)</th>
-    <th>Refl. without loss</th><th>Bad term.</th>
+    <th>Refl. without loss</th>
     <th>lowest disagreement</th><th>Duplicate likelihood</th>
     <th>similarity</th><th>Verdict</th></tr>
 {file_rows}
@@ -813,7 +737,6 @@ broken / pinched end.
 </div>
 
 {refl_block}
-{term_block}
 </body></html>'''
 
     pdf_bytes = html_to_pdf_bytes(html, base_url=folder)
@@ -907,19 +830,16 @@ def build_xlsx_sor(folder, title, out_xlsx):
     # ---------- Per-file verdict ----------
     ws = wb.create_sheet('Per-file verdict')
     headers = ['File', 'Length (km)', 'Span loss (dB)',
-               'Refl. without loss', 'Bad term.',
-               'Lowest disagreement',
+               'Refl. without loss', 'Lowest disagreement',
                'Duplicate likelihood (%)', 'Similarity',
                'Best partner', 'Verdict']
     refl_per_file = analysis.get('refl_only_per_file') or {}
-    term_per_file = analysis.get('bad_term_per_file') or {}
     rows_data = []
     for f in sorted(files, key=lambda x: x['name']):
         bp = best_partner.get(f['name'])
         n_refl = len(refl_per_file.get(f['name']) or [])
-        n_term = len(term_per_file.get(f['name']) or [])
         if bp is None:
-            rows_data.append([f['name'], None, None, n_refl, n_term,
+            rows_data.append([f['name'], None, None, n_refl,
                               None, None, None, None, '—'])
             continue
         partner = bp['b'] if bp['a'] == f['name'] else bp['a']
@@ -930,7 +850,6 @@ def build_xlsx_sor(folder, title, out_xlsx):
             (f['length'] / 1000.0) if f.get('length') else None,
             f.get('loss'),
             n_refl,
-            n_term,
             bp['score'],
             bp['p_dup'] * 100.0,
             bp.get('shape_r'),
@@ -938,7 +857,7 @@ def build_xlsx_sor(folder, title, out_xlsx):
             verdict,
         ])
     _write_table(ws, headers, rows_data,
-                 col_widths=[18, 12, 14, 16, 12, 18, 22, 12, 20, 32])
+                 col_widths=[18, 12, 14, 16, 18, 22, 12, 20, 32])
 
     # ---------- Confirmed duplicates (≥50% likelihood) ----------
     ws = wb.create_sheet('Confirmed duplicates')
@@ -1018,21 +937,6 @@ def build_xlsx_sor(folder, title, out_xlsx):
         ])
     _write_table(ws, headers, rows_data,
                  col_widths=[18, 14, 16, 18])
-
-    # ---------- Bad terminations ----------
-    term_flat = analysis.get('bad_term_flat') or []
-    ws = wb.create_sheet('Bad terminations')
-    headers = ['File', 'Location', 'Position (km)', 'Reflection (dB)']
-    rows_data = []
-    for e in sorted(term_flat, key=lambda x: (x['file'], x.get('pos_km') or 0)):
-        rows_data.append([
-            e.get('file'),
-            e.get('location'),
-            e.get('pos_km'),
-            e.get('reflection_db'),
-        ])
-    _write_table(ws, headers, rows_data,
-                 col_widths=[18, 10, 14, 16])
 
     wb.save(out_xlsx)
     print(f'XLSX: {out_xlsx}')
