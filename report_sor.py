@@ -79,7 +79,8 @@ def _pair_score(a, b, interior_start, interior_end):
     return float(np.std(ta[:n][mask] - tb[:n][mask]))
 
 
-def _compute_pair_metrics_batch(files, interior_start, interior_end, min_samples=50):
+def _compute_pair_metrics_batch(files, interior_start, interior_end, min_samples=50,
+                                  tie_panel_mode=False):
     """Vectorized pair-metric computation. For N files this scales as O(N²·S)
     via two matmuls instead of O(N²) Python loops, so 864-file runs go from
     hours to seconds.
@@ -126,9 +127,39 @@ def _compute_pair_metrics_batch(files, interior_start, interior_end, min_samples
               - (m1[:, None] - m1[None, :]) ** 2)
     sigma_matrix = np.sqrt(np.maximum(var_ij, 0.0))
 
-    # Pearson r on detrended traces. Detrended rows are mean-≈-0, but subtract
-    # to be exact. Then r_ij = (Mc @ Mc.T) / (N · std_i · std_j).
-    Mc = (M_det.astype(np.float64) - M_det.astype(np.float64).mean(axis=1, keepdims=True))
+    # Pearson r on detrended traces, after FINGERPRINT EXTRACTION:
+    # subtract the per-position MEDIAN trace across files so the launch
+    # reflection, attenuation slope, and shared connector signatures that
+    # every fiber sees through the same launch box get cancelled. What
+    # remains is each fiber's unique Rayleigh-scatterer fingerprint +
+    # shot noise — the actual basis for "same fiber" calls.
+    #
+    # Why median (not mean): in datasets where duplicates make up a large
+    # fraction of the files (e.g. TEST DUPE has 12 of 18 fibers in
+    # duplicate pairs), the mean is biased toward the duplicate signal and
+    # subtracting it weakens the same-fiber agreement. The median is
+    # robust to that — it represents the typical "non-duplicate" trace
+    # even when ~half the dataset is duplicates of the other half.
+    #
+    # Without this step, tie panels (short fibers with no splice events)
+    # show inflated r because the shared launch+connector features
+    # dominate the trace. With it, two truly-different short fibers
+    # uncorrelate to near zero.
+    M_det64 = M_det.astype(np.float64)
+    if tie_panel_mode:
+        # Subtract the median trace across all files: removes the shared
+        # launch + connector signal so the per-fiber Rayleigh fingerprint
+        # is what r actually measures. Median (not mean) is robust to the
+        # presence of real duplicates in the dataset.
+        group_ref = np.median(M_det64, axis=0, keepdims=True)
+        M_fingerprint = M_det64 - group_ref
+    else:
+        # Production mode: skip fingerprint extraction. Real same-fiber
+        # duplicates with naturally-low r (0.85-0.94) on long fibers
+        # shouldn't be demoted by an aggressive shared-signal subtraction.
+        M_fingerprint = M_det64
+    # Re-center each row's residual fingerprint (should already be near zero).
+    Mc = M_fingerprint - M_fingerprint.mean(axis=1, keepdims=True)
     std = np.sqrt((Mc ** 2).mean(axis=1))
     std_outer = np.outer(std, std)
     np.maximum(std_outer, 1e-12, out=std_outer)
@@ -318,7 +349,21 @@ def _analyze_sor(folder):
 
     print(f'Computing pair metrics for {len(files)} files '
           f'({len(files) * (len(files) - 1) // 2} pairs)...')
-    batch = _compute_pair_metrics_batch(files, interior_start, interior_end)
+    # Tie-panel mode: detect when files have ~no interior splice events.
+    # Triggers fingerprint extraction (median subtraction) on the Pearson
+    # side AND adds an r-confirmation gate on σ-outlier — tie panels have
+    # narrow σ bulks AND shared launch+connector signatures that produce
+    # false positives in both metrics without these guards.
+    def _interior_event_count(f):
+        return sum(1 for e in (f.get('events') or [])
+                   if not e.get('is_end') and (e.get('dist_km') or 0) > 0.01)
+    event_counts = [_interior_event_count(f) for f in files]
+    median_events = (sorted(event_counts)[len(event_counts)//2]
+                     if event_counts else 0)
+    tie_panel_mode = median_events <= 2
+    print(f'Tie-panel mode: {tie_panel_mode} (median interior events / file = {median_events})')
+    batch = _compute_pair_metrics_batch(files, interior_start, interior_end,
+                                          tie_panel_mode=tie_panel_mode)
     if batch is None:
         raise RuntimeError('No comparable pairs after interior masking')
     sigma_matrix, r_matrix, valid_idx = batch
@@ -359,8 +404,24 @@ def _analyze_sor(folder):
 
     p_dup_r = np.array([_r_to_p(p.get('shape_r')) for p in pairs],
                        dtype=np.float64)
-    # Combined likelihood = max of σ-outlier and shape-correlation tiers.
-    p_dup_raw = np.maximum(p_dup_sigma, p_dup_r)
+
+    # Tie-panel mode also enables an r-confirmation gate: σ-outlier over-fires
+    # on narrow bulk distributions, so it has to be corroborated by Pearson
+    # r ≥ 0.9. Production mode keeps the original max(σ, r) combiner — real
+    # long-fiber duplicates can have r as low as 0.85 (naturally noisy at
+    # km scale) and the length-Δ + event-table filters already protect
+    # against most σ-only false positives there.
+    if tie_panel_mode:
+        R_CONFIRM_THRESH = 0.9
+        r_values = np.array([(p.get('shape_r') if p.get('shape_r') is not None else 0.0)
+                             for p in pairs], dtype=np.float64)
+        r_confirmed = r_values >= R_CONFIRM_THRESH
+        p_dup_sigma_eff = np.where(r_confirmed, p_dup_sigma,
+                                   np.minimum(p_dup_sigma, 0.49))
+    else:
+        p_dup_sigma_eff = p_dup_sigma
+    # Combined likelihood = max of (possibly confirmed) σ-outlier and r tiers.
+    p_dup_raw = np.maximum(p_dup_sigma_eff, p_dup_r)
 
     # Physical-reality filter: same fiber must produce the same end-of-fiber
     # length to within launch-connector + IOR + sample-resolution variation.
