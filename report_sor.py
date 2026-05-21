@@ -391,16 +391,27 @@ def _analyze_sor(folder):
     scores = np.array([p['score'] for p in pairs], dtype=np.float64)
     p_dup_sigma, stats = _outlier_probability(scores)
 
-    # Pearson-shape contribution: r ≥ 0.99 → 1.0, r ≤ 0.95 → 0, linear in between.
-    # Same ramp as JSON/TRC mode, so the verdict reads the combined likelihood.
+    # Pearson-shape contribution. Production mode uses the standard ramp
+    # (r=0.95→0, r=0.99→1.0). Tie-panel mode tightens to (r=0.999→0,
+    # r=0.9999→1.0): even after fingerprint extraction, tie panels can
+    # show r up to ~0.998 between physically-different fibers because the
+    # 2-km-scale traces share more bend / attenuation-profile structure
+    # than the median can capture. Real same-fiber re-shoots on a tie
+    # panel produce r ≈ 1.0 (≥ 0.9999), so the tighter cutoff still
+    # catches them while killing the residual structural false positives.
+    if tie_panel_mode:
+        R_LO, R_HI = 0.999, 0.9999
+    else:
+        R_LO, R_HI = 0.95, 0.99
+    _R_SPAN = R_HI - R_LO
     def _r_to_p(r):
         if r is None:
             return 0.0
-        if r >= 0.99:
+        if r >= R_HI:
             return 1.0
-        if r <= 0.95:
+        if r <= R_LO:
             return 0.0
-        return float((r - 0.95) / 0.04)
+        return float((r - R_LO) / _R_SPAN)
 
     p_dup_r = np.array([_r_to_p(p.get('shape_r')) for p in pairs],
                        dtype=np.float64)
