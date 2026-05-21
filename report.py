@@ -323,6 +323,124 @@ def _shape_r(a, b, wl):
     return float(np.dot(da - da.mean(), db - db.mean()) / (sa * sb * len(da)))
 
 
+def _compute_pair_metrics_batch_multiwl(files, wl_list, min_samples=50,
+                                          tie_panel_mode=False):
+    """Vectorized per-wavelength σ and r matrices. Mirrors the SOR-mode
+    `_compute_pair_metrics_batch` but iterates wavelengths so JSON / TRC
+    multi-λ inputs get the same matmul speed-up and the same optional
+    fingerprint-extraction step.
+
+    Returns a dict keyed by wavelength:
+        {wl: {'sigma_matrix': (K,K), 'r_matrix': (K,K), 'valid_idx': [int,...]}}
+
+    `valid_idx` is the list of indices into `files` that had enough interior
+    samples at that wavelength to participate (K = len(valid_idx) for the wl).
+
+    When tie_panel_mode=True, the per-wavelength r matrix is computed AFTER
+    subtracting the per-position median trace across the K participating
+    files — strips the shared launch+connector signature so r reflects each
+    fiber's unique scatter fingerprint.
+    """
+    results = {}
+    for wl in wl_list:
+        interior = []
+        valid_idx = []
+        for i, f in enumerate(files):
+            wlblock = (f.get('wl') or {}).get(wl)
+            if wlblock is None:
+                continue
+            ta = wlblock.get('trace')
+            pa = wlblock.get('pos')
+            if ta is None or pa is None:
+                continue
+            n = min(len(ta), len(pa))
+            length_m = wlblock.get('length_m')
+            mask = _interior_mask(pa[:n], length_m=length_m)
+            if mask.sum() < min_samples:
+                continue
+            interior.append((ta[:n][mask].astype(np.float32),
+                             pa[:n][mask].astype(np.float32)))
+            valid_idx.append(i)
+        if len(interior) < 2:
+            continue
+        N = min(len(d[0]) for d in interior)
+        K = len(interior)
+        M_raw = np.empty((K, N), dtype=np.float32)
+        M_det = np.empty((K, N), dtype=np.float32)
+        for k, (ts, ps) in enumerate(interior):
+            ts = ts[:N]; ps = ps[:N]
+            M_raw[k] = ts
+            pm = ps.mean(); tm = ts.mean()
+            denom = ((ps - pm) ** 2).sum()
+            slope = float(((ps - pm) * (ts - tm)).sum() / denom) if denom > 0 else 0.0
+            intercept = float(tm - slope * pm)
+            M_det[k] = ts - (slope * ps + intercept)
+
+        # σ matrix via variance-decomposition identity (no K×N intermediate).
+        m1 = M_raw.mean(axis=1)
+        m2 = (M_raw.astype(np.float64) ** 2).mean(axis=1)
+        C = (M_raw.astype(np.float64) @ M_raw.astype(np.float64).T) / float(N)
+        var_ij = (m2[:, None] + m2[None, :] - 2.0 * C
+                  - (m1[:, None] - m1[None, :]) ** 2)
+        sigma_matrix = np.sqrt(np.maximum(var_ij, 0.0))
+
+        # r matrix on detrended traces, with optional fingerprint extraction.
+        M_det64 = M_det.astype(np.float64)
+        if tie_panel_mode:
+            group_ref = np.median(M_det64, axis=0, keepdims=True)
+            M_fingerprint = M_det64 - group_ref
+        else:
+            M_fingerprint = M_det64
+        Mc = M_fingerprint - M_fingerprint.mean(axis=1, keepdims=True)
+        std = np.sqrt((Mc ** 2).mean(axis=1))
+        std_outer = np.outer(std, std)
+        np.maximum(std_outer, 1e-12, out=std_outer)
+        r_matrix = (Mc @ Mc.T) / (float(N) * std_outer)
+        np.clip(r_matrix, -1.0, 1.0, out=r_matrix)
+
+        results[wl] = {
+            'sigma_matrix': sigma_matrix,
+            'r_matrix': r_matrix,
+            'valid_idx': valid_idx,
+        }
+    return results
+
+
+def _tie_panel_mode_for(files):
+    """Decide whether to treat the dataset as a tie-panel run, returns
+    (tie_panel_mode_bool, median_event_count).
+
+    Tie-panel signature: many short fibers with no real splices to compare,
+    only connector reflections at both ends. We need both indicators to be
+    confident:
+      - median per-file interior splice-event count ≤ 2
+      - file count ≥ 20  (tray-style upload, not a small calibration set)
+
+    The file-count floor protects small same-fiber re-shoot datasets
+    (TEST DUPE 18 files, newbeta 12 files) that also have ~0 events but
+    are NOT tie panels — they're real-duplicate validation cases that
+    need the standard r-ramp (0.95-0.99) to keep producing the right
+    answers."""
+    def _interior_events(f):
+        # Collect events from whichever wavelength the file carries.
+        per_wl_counts = []
+        for wl, wlblock in (f.get('wl') or {}).items():
+            evts = wlblock.get('events') or []
+            n = sum(1 for e in evts
+                    if not e.get('is_end') and (e.get('dist_km') or 0) > 0.01)
+            per_wl_counts.append(n)
+        # Best (max) wavelength: if any wavelength sees splices, we have
+        # event data. Avoids penalizing files whose 1310 nm trace has no
+        # detected events but 1550 nm does.
+        return max(per_wl_counts) if per_wl_counts else 0
+    counts = [_interior_events(f) for f in files]
+    if not counts:
+        return False, 0
+    median_count = sorted(counts)[len(counts) // 2]
+    is_tie_panel = (median_count <= 2) and (len(files) >= 20)
+    return is_tie_panel, median_count
+
+
 def _shape_tier(r):
     """Bin a Pearson r into a same-fiber tier."""
     if r is None:
@@ -560,31 +678,67 @@ def chart_histogram(all_pairs_list):
     return base64.b64encode(buf.read()).decode('ascii')
 
 
-def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate Classification Report'):
-    truth_dups = truth_dups or set()
+def _finalize_pairs_multiwl(files, all_pairs_list, tie_panel_mode=False):
+    """Run the σ-outlier + r-tier + physical-reality math on a freshly built
+    multi-λ pair list. Mutates each pair dict in place (sets `p_dup`,
+    `p_dup_r`, `z`, `length_capped`, `events_capped`, `length_delta_m`,
+    `events_*`, `events_max_dloss_per_wl`) and returns a dict with:
+        'p_dup_arr'      — np.array of final P(dup) values, pair-aligned
+        'p_dup_r_arr'    — np.array of r-tier P(dup) values
+        'prob_stats'     — diagnostic dict from _outlier_probability
+        'best_partner'   — {file_name: {'partner', 'sum_score', 'p_dup', 'pair'}}
+        'pair_lookup'    — {(sorted(a,b)): pair_dict}
+
+    Used by both build_report (PDF/HTML) and build_xlsx_multiwl (Excel) so
+    the two renderers can never drift.
+    """
     pair_lookup = {tuple(sorted([p['a'], p['b']])): p for p in all_pairs_list}
 
     combined = np.array([p['sum_score'] for p in all_pairs_list], dtype=np.float64)
     p_dup_sigma_arr, prob_stats = _outlier_probability(combined)
-    # Pearson-shape contribution: r ≥ 0.99 → 1.0,  r ≤ 0.95 → 0,  linear in between.
-    # This catches short-fiber duplicates that look noisy in σ but match in shape.
+
+    # Pearson-shape contribution. Production mode uses the standard ramp
+    # (r=0.95→0, r=0.99→1.0). Tie-panel mode tightens to (r=0.999→0,
+    # r=0.9999→1.0) — see report_sor for full rationale. Real same-fiber
+    # tie-panel re-shoots produce r ≈ 1.0 because the per-fiber Rayleigh
+    # fingerprint dominates once the shared signal is gone; tie-panel
+    # false positives sit well below 0.999.
+    if tie_panel_mode:
+        _R_LO, _R_HI = 0.999, 0.9999
+    else:
+        _R_LO, _R_HI = 0.95, 0.99
+    _R_SPAN = _R_HI - _R_LO
     def _r_to_p(r):
         if r is None:
             return 0.0
-        if r >= 0.99:
+        if r >= _R_HI:
             return 1.0
-        if r <= 0.95:
+        if r <= _R_LO:
             return 0.0
-        return float((r - 0.95) / 0.04)
+        return float((r - _R_LO) / _R_SPAN)
     p_dup_r_arr = np.array([_r_to_p(p.get('r_min')) for p in all_pairs_list],
                            dtype=np.float64)
-    # Raw combined likelihood = max of σ-outlier and shape-correlation tiers.
-    p_dup_raw_arr = np.maximum(p_dup_sigma_arr, p_dup_r_arr)
+
+    # Tie-panel mode also enables an r-confirmation gate on σ-outlier:
+    # narrow bulk distributions inflate σ-outlier prob even when no real
+    # outlier exists. Require r_min ≥ 0.9 for σ-only flags to claim ≥ 50%.
+    if tie_panel_mode:
+        R_CONFIRM_THRESH = 0.9
+        r_min_arr = np.array([(p.get('r_min') if p.get('r_min') is not None else 0.0)
+                              for p in all_pairs_list], dtype=np.float64)
+        r_confirmed = r_min_arr >= R_CONFIRM_THRESH
+        p_dup_sigma_eff = np.where(r_confirmed, p_dup_sigma_arr,
+                                   np.minimum(p_dup_sigma_arr, 0.49))
+    else:
+        p_dup_sigma_eff = p_dup_sigma_arr
+
+    # Raw combined likelihood = max of (possibly confirmed) σ-outlier and r tiers.
+    p_dup_raw_arr = np.maximum(p_dup_sigma_eff, p_dup_r_arr)
 
     # Physical-reality filters (mirror SOR mode):
     #
     #   1. Length-Δ filter: same fiber → same end-of-fiber length within
-    #      tolerance scaled max(0.5 m, min(2 m, length × 0.0001)).
+    #      tolerance max(10 m, length × 5e-4).
     #   2. Event-table filter: same fiber → splice events match in count,
     #      position, and loss. Required: ≥3 matched events, ≥85% match
     #      against max(n_a, n_b), mean |Δloss| ≤ 10 mdB.
@@ -593,10 +747,6 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
     # Use the longest-wavelength λ shared by all files for length and
     # events (1550 nm is canonical when present).
     def _len_tol_m(length_m):
-        # Tolerance accommodates launch-cable-swap systematic offsets (~5 m
-        # observed in real re-shoots) but still catches physically-different-
-        # fiber routing differences (typically tens to hundreds of meters).
-        # The event filter does the fine-grained discrimination.
         if length_m is None or length_m <= 0:
             return 10.0
         return max(10.0, length_m * 5e-4)
@@ -673,6 +823,24 @@ def build_report(files, all_pairs_list, truth_dups, out_path, title='Duplicate C
                 or (cand['p_dup'] == best['p_dup'] and cand['sum_score'] < best['sum_score'])):
                 best = cand
         best_partner[f['name']] = best
+
+    return {
+        'p_dup_arr':    p_dup_arr,
+        'p_dup_r_arr':  p_dup_r_arr,
+        'prob_stats':   prob_stats,
+        'best_partner': best_partner,
+        'pair_lookup':  pair_lookup,
+    }
+
+
+def build_report(files, all_pairs_list, truth_dups, out_path,
+                 title='Duplicate Classification Report', tie_panel_mode=False):
+    truth_dups = truth_dups or set()
+    fin = _finalize_pairs_multiwl(files, all_pairs_list,
+                                  tie_panel_mode=tie_panel_mode)
+    pair_lookup  = fin['pair_lookup']
+    best_partner = fin['best_partner']
+    p_dup_arr    = fin['p_dup_arr']
 
     dup_pairs = [p for p in all_pairs_list
                  if all((p['score'][wl] is not None and p['score'][wl] < _SCORE_GATE)
@@ -957,24 +1125,297 @@ def html_to_pdf(html_path, pdf_path):
     return True
 
 
+def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
+                       title='Duplicate Classification Report',
+                       wl_list=None, tie_panel_mode=False):
+    global WL_ORDER
+    """Multi-wavelength (JSON/TRC) Excel renderer. Mirrors build_xlsx_sor's
+    6-sheet layout, but every per-λ metric becomes its own column.
+
+    Sheets:
+      Summary                — header counts and verdict
+      Per-file verdict       — per-file row with per-λ span loss + verdict
+      Confirmed duplicates   — pairs at ≥50% likelihood, per-λ detail columns
+      Top 30 — lowest disagreement
+      Top 30 — highest similarity
+      Charts                 — distribution + histogram PNGs
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    from openpyxl.drawing.image import Image as XlsxImage
+
+    truth_dups = truth_dups or set()
+    wl_list = list(wl_list) if wl_list else list(WL_ORDER)
+
+    fin = _finalize_pairs_multiwl(files, all_pairs_list,
+                                  tie_panel_mode=tie_panel_mode)
+    pair_lookup  = fin['pair_lookup']
+    best_partner = fin['best_partner']
+    p_dup_arr    = fin['p_dup_arr']
+
+    n_files = len(files)
+    n_pairs = len(all_pairs_list)
+    n99 = int((p_dup_arr > 0.99).sum())
+    n50 = int((p_dup_arr > 0.5).sum())
+    n10 = int((p_dup_arr > 0.1).sum())
+
+    wb = Workbook()
+
+    # Calibri 12 everywhere — matches SOR Excel and the rest of the UX.
+    BASE      = Font(name='Calibri', size=12)
+    BASE_BOLD = Font(name='Calibri', size=12, bold=True)
+    TITLE_FONT = Font(name='Calibri', size=14, bold=True)
+    HDR_FONT  = Font(name='Calibri', size=12, bold=True, color='FFFFFF')
+    hdr_fill  = PatternFill('solid', fgColor='2C3E50')
+
+    # ---------- Summary ----------
+    ws = wb.active
+    ws.title = 'Summary'
+    ws['A1'] = title
+    ws['A1'].font = TITLE_FONT
+    ws['A2'] = f'Generated {datetime.now().strftime("%Y-%m-%d %H:%M")}'
+    ws['A2'].font = BASE
+
+    wl_label = ', '.join(f'{w} nm' for w in wl_list)
+    rows = [
+        ('Files',             n_files),
+        ('Pairs',             n_pairs),
+        ('Wavelengths',       wl_label),
+        ('Likelihood ≥ 99%',  n99),
+        ('Likelihood ≥ 50%',  n50),
+        ('Likelihood ≥ 10%',  n10),
+        ('Tie-panel mode',    'Yes' if tie_panel_mode else 'No'),
+        ('Interior window (m)', f'{_INTERIOR_MIN_M:.0f}–{_INTERIOR_MAX_M:.0f}'),
+    ]
+    for i, (k, v) in enumerate(rows, start=4):
+        c1 = ws.cell(row=i, column=1, value=k); c1.font = BASE_BOLD
+        c2 = ws.cell(row=i, column=2, value=v); c2.font = BASE
+    ws.column_dimensions['A'].width = 22
+    ws.column_dimensions['B'].width = 32
+
+    def _write_table(ws, headers, rows_data, col_widths=None):
+        for c, h in enumerate(headers, start=1):
+            cell = ws.cell(row=1, column=c, value=h)
+            cell.fill = hdr_fill
+            cell.font = HDR_FONT
+            cell.alignment = Alignment(horizontal='center')
+        for r, row in enumerate(rows_data, start=2):
+            for c, v in enumerate(row, start=1):
+                cell = ws.cell(row=r, column=c, value=v)
+                cell.font = BASE
+        ws.freeze_panes = 'A2'
+        ws.auto_filter.ref = (f'A1:{get_column_letter(len(headers))}'
+                              f'{1 + len(rows_data)}')
+        if col_widths:
+            for c, w in enumerate(col_widths, start=1):
+                ws.column_dimensions[get_column_letter(c)].width = w
+
+    # ---------- Per-file verdict ----------
+    # File | Acq time | Length (km) | span loss @ <wl> (one col per λ) |
+    # combined disagreement | duplicate likelihood (%) | similarity (min λ) |
+    # best partner | verdict
+    ws = wb.create_sheet('Per-file verdict')
+    span_loss_hdrs = [f'Span loss @ {wl} nm (dB)' for wl in wl_list]
+    headers = (['File', 'Acquisition time', 'Length (km)']
+               + span_loss_hdrs
+               + ['Combined disagreement', 'Duplicate likelihood (%)',
+                  'Similarity (min λ)', 'Best partner', 'Verdict'])
+    rows_data = []
+    for f in sorted(files, key=lambda x: x['name']):
+        bp = best_partner.get(f['name'])
+        # Longest λ-reported length, in km
+        lengths = [(f['wl'].get(wl) or {}).get('length_m') for wl in wl_list]
+        lengths = [L for L in lengths if L]
+        length_km = (max(lengths) / 1000.0) if lengths else None
+        span_loss_cells = []
+        for wl in wl_list:
+            sl = (f['wl'].get(wl) or {}).get('span_loss_dB')
+            span_loss_cells.append(sl)
+        if bp is None:
+            rows_data.append([f['name'], f.get('test_dt', '')[:19], length_km]
+                             + span_loss_cells
+                             + [None, None, None, None, '—'])
+            continue
+        partner = bp['partner']
+        pair    = bp['pair']
+        verdict = (f'DUPLICATE of {partner}' if pair['p_dup'] > 0.5
+                   else f'unique (closest: {partner})')
+        rows_data.append([
+            f['name'],
+            f.get('test_dt', '')[:19],
+            length_km,
+        ] + span_loss_cells + [
+            bp['sum_score'],
+            pair['p_dup'] * 100.0,
+            pair.get('r_min'),
+            partner,
+            verdict,
+        ])
+    cw = [18, 20, 12] + [16] * len(wl_list) + [22, 22, 18, 20, 32]
+    _write_table(ws, headers, rows_data, col_widths=cw)
+
+    # ---------- Confirmed duplicates (≥50% likelihood) ----------
+    ws = wb.create_sheet('Confirmed duplicates')
+    ms_hdrs = [f'Max splice Δ @ {wl} (mdB)' for wl in wl_list]
+    sl_hdrs = [f'Span loss Δ @ {wl} (mdB)' for wl in wl_list]
+    sr_hdrs = [f'Similarity @ {wl}'         for wl in wl_list]
+    headers = (['Pair A', 'Pair B', 'Time gap (s)']
+               + ms_hdrs + sl_hdrs + sr_hdrs
+               + ['Duplicate likelihood (%)'])
+    file_by_name = {f['name']: f for f in files}
+    dup_sorted = sorted([p for p in all_pairs_list if p['p_dup'] > 0.5],
+                        key=lambda q: -q['p_dup'])
+    rows_data = []
+    for p in dup_sorted:
+        fa = file_by_name.get(p['a'])
+        fb = file_by_name.get(p['b'])
+        if fa is None or fb is None:
+            continue
+        ta, tb = (fa.get('test_epoch'), fb.get('test_epoch'))
+        gap = int(abs(ta - tb)) if (ta and tb) else None
+        max_dloss_map = p.get('events_max_dloss_per_wl') or {}
+        ms_cells = []
+        sl_cells = []
+        sr_cells = []
+        for wl in wl_list:
+            mxd = max_dloss_map.get(wl)
+            ms_cells.append(mxd * 1000.0 if mxd and mxd > 0 else None)
+            a_sl = (fa['wl'].get(wl) or {}).get('span_loss_dB')
+            b_sl = (fb['wl'].get(wl) or {}).get('span_loss_dB')
+            sl_cells.append(abs(a_sl - b_sl) * 1000.0
+                            if (a_sl is not None and b_sl is not None) else None)
+            sr_cells.append((p.get('shape_r') or {}).get(wl))
+        rows_data.append(
+            [p['a'], p['b'], gap]
+            + ms_cells + sl_cells + sr_cells
+            + [p['p_dup'] * 100.0]
+        )
+    cw = ([18, 18, 13] + [22] * len(wl_list)
+          + [22] * len(wl_list) + [16] * len(wl_list) + [22])
+    _write_table(ws, headers, rows_data, col_widths=cw)
+
+    # ---------- Top 30 — lowest disagreement ----------
+    ws = wb.create_sheet('Top 30 lowest disagreement')
+    headers = ['Rank', 'Pair A', 'Pair B', 'Combined disagreement',
+               'Duplicate likelihood (%)', 'Similarity (min λ)']
+    order = sorted(range(len(all_pairs_list)),
+                   key=lambda i: all_pairs_list[i]['sum_score'])
+    rows_data = []
+    for rank, k in enumerate(order[:30], 1):
+        p = all_pairs_list[k]
+        rows_data.append([
+            rank, p['a'], p['b'], p['sum_score'],
+            p['p_dup'] * 100.0, p.get('r_min'),
+        ])
+    _write_table(ws, headers, rows_data,
+                 col_widths=[6, 18, 18, 22, 22, 18])
+
+    # ---------- Top 30 — highest similarity ----------
+    ws = wb.create_sheet('Top 30 highest similarity')
+    headers = ['Rank', 'Pair A', 'Pair B', 'Similarity (min λ)',
+               'Combined disagreement', 'Duplicate likelihood (%)']
+    sim_sorted = sorted(
+        [(i, p) for i, p in enumerate(all_pairs_list)
+         if p.get('r_min') is not None],
+        key=lambda x: -x[1]['r_min'])[:30]
+    rows_data = []
+    for rank, (_, p) in enumerate(sim_sorted, 1):
+        rows_data.append([
+            rank, p['a'], p['b'], p.get('r_min'),
+            p['sum_score'], p['p_dup'] * 100.0,
+        ])
+    _write_table(ws, headers, rows_data,
+                 col_widths=[6, 18, 18, 18, 22, 22])
+
+    # ---------- Charts ----------
+    # Reuse the same multi-λ PNG renderers that feed the PDF so the Excel
+    # user sees the identical visuals. WL_ORDER is consulted by the chart
+    # functions for per-λ panels; temporarily override it for TRC datasets
+    # that report different wavelengths.
+    saved_wl = WL_ORDER
+    WL_ORDER = wl_list
+    try:
+        chart_b64 = chart_distribution(all_pairs_list)
+        hist_b64  = chart_histogram(all_pairs_list)
+    finally:
+        WL_ORDER = saved_wl
+
+    try:
+        ws = wb.create_sheet('Charts')
+        ws['A1'] = 'Distribution charts'
+        ws['A1'].font = TITLE_FONT
+        # Distribution panel — full height (4 stacked subplots at 13×9)
+        png_bytes = base64.b64decode(chart_b64)
+        img = XlsxImage(BytesIO(png_bytes))
+        orig_w, orig_h = img.width, img.height
+        target_w = 1400
+        img.width  = target_w
+        img.height = int(target_w * orig_h / orig_w) if orig_w else target_w // 2
+        ws.add_image(img, 'A3')
+        # Histogram panel — placed below the distribution chart
+        if hist_b64:
+            png2 = base64.b64decode(hist_b64)
+            img2 = XlsxImage(BytesIO(png2))
+            ow, oh = img2.width, img2.height
+            img2.width  = target_w
+            img2.height = int(target_w * oh / ow) if ow else target_w // 2
+            # leave ~60 rows below the distribution chart
+            ws.add_image(img2, 'A70')
+    except Exception as exc:
+        print(f'  warn: skipped Charts sheet ({exc})')
+
+    wb.save(out_xlsx)
+    print(f'XLSX: {out_xlsx}')
+    return out_xlsx
+
+
+def _build_pairs_multiwl(files, wl_list, truth_dups):
+    """Compute the all_pairs list using the batch metric helper. Returns
+    (all_pairs, tie_panel_mode_bool)."""
+    tie_panel_mode, median_evts = _tie_panel_mode_for(files)
+    print(f'Tie-panel mode: {tie_panel_mode} '
+          f'(median interior events / file = {median_evts})')
+    batch = _compute_pair_metrics_batch_multiwl(files, wl_list,
+                                                  tie_panel_mode=tie_panel_mode)
+    # Build a (file_index_i, file_index_j) -> per-wavelength scalar lookup.
+    n = len(files)
+    pairs_by_key = {}
+    for wl, b in batch.items():
+        K = len(b['valid_idx'])
+        sm, rm, vi = b['sigma_matrix'], b['r_matrix'], b['valid_idx']
+        for ki in range(K):
+            i = vi[ki]
+            for kj in range(ki + 1, K):
+                j = vi[kj]
+                key = (i, j)
+                rec = pairs_by_key.setdefault(key, {'score': {}, 'shape_r': {}})
+                rec['score'][wl] = float(sm[ki, kj])
+                rec['shape_r'][wl] = float(rm[ki, kj])
+    truth_dups = truth_dups or set()
+    all_pairs = []
+    for (i, j), rec in pairs_by_key.items():
+        a, b = files[i], files[j]
+        sc, rs = rec['score'], rec['shape_r']
+        sum_sc = sum(v for v in sc.values() if v is not None)
+        rs_vals = [v for v in rs.values() if v is not None]
+        r_min = min(rs_vals) if rs_vals else None
+        is_dup = tuple(sorted([a['name'], b['name']])) in truth_dups
+        all_pairs.append({'a': a['name'], 'b': b['name'],
+                          'score': sc, 'sum_score': sum_sc, 'is_dup': is_dup,
+                          'shape_r': rs, 'r_min': r_min})
+    return all_pairs, tie_panel_mode
+
+
 def build_json_html(folder, title='Duplicate Classification Report', truth_dups=None):
     paths = sorted(glob.glob(os.path.join(folder, '*.json')))
     if not paths:
         raise RuntimeError(f'No JSON files found in {folder}')
     files = [load_file(p) for p in paths]
-    all_pairs = []
-    for a, b in combinations(files, 2):
-        sc = {wl: _score(a, b, wl) for wl in WL_ORDER}
-        rs = {wl: _shape_r(a, b, wl) for wl in WL_ORDER}
-        sum_sc = sum(v for v in sc.values() if v is not None)
-        rs_vals = [v for v in rs.values() if v is not None]
-        r_min = min(rs_vals) if rs_vals else None
-        is_dup = tuple(sorted([a['name'], b['name']])) in (truth_dups or set())
-        all_pairs.append({'a': a['name'], 'b': b['name'],
-                          'score': sc, 'sum_score': sum_sc, 'is_dup': is_dup,
-                          'shape_r': rs, 'r_min': r_min})
+    all_pairs, tie_panel_mode = _build_pairs_multiwl(files, WL_ORDER, truth_dups)
     out_html_tmp = os.path.join(folder, '_tmp_report.html')
-    build_report(files, all_pairs, truth_dups or set(), out_html_tmp, title=title)
+    build_report(files, all_pairs, truth_dups or set(), out_html_tmp,
+                 title=title, tie_panel_mode=tie_panel_mode)
     with open(out_html_tmp, 'r', encoding='utf-8') as fh:
         html = fh.read()
     try:
@@ -987,6 +1428,32 @@ def build_json_html(folder, title='Duplicate Classification Report', truth_dups=
 def run_json_bytes(folder, title='Duplicate Classification Report', truth_dups=None):
     html, files, pairs = build_json_html(folder, title=title, truth_dups=truth_dups)
     return html_to_pdf_bytes(html, base_url=folder), len(files), len(pairs)
+
+
+def build_xlsx_json(folder, title, out_xlsx, truth_dups=None):
+    """Load JSON files from `folder`, run the multi-λ pipeline, and write an
+    Excel workbook to `out_xlsx`. Same analysis as the PDF flow."""
+    paths = sorted(glob.glob(os.path.join(folder, '*.json')))
+    if not paths:
+        raise RuntimeError(f'No JSON files found in {folder}')
+    files = [load_file(p) for p in paths]
+    all_pairs, tie_panel_mode = _build_pairs_multiwl(files, WL_ORDER, truth_dups)
+    build_xlsx_multiwl(files, all_pairs, truth_dups or set(), out_xlsx,
+                       title=title, wl_list=WL_ORDER,
+                       tie_panel_mode=tie_panel_mode)
+    return out_xlsx, files, all_pairs
+
+
+def run_json_xlsx_bytes(folder, title='Duplicate Classification Report', truth_dups=None):
+    """Run JSON mode and return (xlsx_bytes, n_files, n_pairs). Mirrors
+    run_sor_xlsx_bytes so app.py can switch between modes uniformly."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = os.path.join(td, 'report.xlsx')
+        _, files, pairs = build_xlsx_json(folder, title, tmp, truth_dups=truth_dups)
+        with open(tmp, 'rb') as fh:
+            xlsx_bytes = fh.read()
+    return xlsx_bytes, len(files), len(pairs)
 
 
 def build_trc_html(folder, title='Duplicate Classification Report', truth_dups=None):
@@ -1003,23 +1470,14 @@ def build_trc_html(folder, title='Duplicate Classification Report', truth_dups=N
     for f in files[1:]:
         common &= set(f['wl'].keys())
     wl_list = sorted(common) or WL_ORDER
-    all_pairs = []
-    for a, b in combinations(files, 2):
-        sc = {wl: _score(a, b, wl) for wl in wl_list}
-        rs = {wl: _shape_r(a, b, wl) for wl in wl_list}
-        sum_sc = sum(v for v in sc.values() if v is not None)
-        rs_vals = [v for v in rs.values() if v is not None]
-        r_min = min(rs_vals) if rs_vals else None
-        is_dup = tuple(sorted([a['name'], b['name']])) in (truth_dups or set())
-        all_pairs.append({'a': a['name'], 'b': b['name'],
-                          'score': sc, 'sum_score': sum_sc, 'is_dup': is_dup,
-                          'shape_r': rs, 'r_min': r_min})
+    all_pairs, tie_panel_mode = _build_pairs_multiwl(files, wl_list, truth_dups)
     # Override module-level WL_ORDER for rendering when TRC carries fewer/other λ
     saved = WL_ORDER
     WL_ORDER = wl_list
     out_html_tmp = os.path.join(folder, '_tmp_report.html')
     try:
-        build_report(files, all_pairs, truth_dups or set(), out_html_tmp, title=title)
+        build_report(files, all_pairs, truth_dups or set(), out_html_tmp,
+                     title=title, tie_panel_mode=tie_panel_mode)
         with open(out_html_tmp, 'r', encoding='utf-8') as fh:
             html = fh.read()
     finally:
@@ -1034,6 +1492,36 @@ def build_trc_html(folder, title='Duplicate Classification Report', truth_dups=N
 def run_trc_bytes(folder, title='Duplicate Classification Report', truth_dups=None):
     html, files, pairs = build_trc_html(folder, title=title, truth_dups=truth_dups)
     return html_to_pdf_bytes(html, base_url=folder), len(files), len(pairs)
+
+
+def build_xlsx_trc(folder, title, out_xlsx, truth_dups=None):
+    """Load TRC files from `folder`, run the multi-λ pipeline, and write an
+    Excel workbook to `out_xlsx`. Uses whichever wavelengths the TRCs
+    actually carry (falls back to WL_ORDER if every file matches)."""
+    paths = sorted(glob.glob(os.path.join(folder, '*.trc')))
+    if not paths:
+        raise RuntimeError(f'No TRC files found in {folder}')
+    files = [load_trc_file(p) for p in paths]
+    common = set(files[0]['wl'].keys())
+    for f in files[1:]:
+        common &= set(f['wl'].keys())
+    wl_list = sorted(common) or WL_ORDER
+    all_pairs, tie_panel_mode = _build_pairs_multiwl(files, wl_list, truth_dups)
+    build_xlsx_multiwl(files, all_pairs, truth_dups or set(), out_xlsx,
+                       title=title, wl_list=wl_list,
+                       tie_panel_mode=tie_panel_mode)
+    return out_xlsx, files, all_pairs
+
+
+def run_trc_xlsx_bytes(folder, title='Duplicate Classification Report', truth_dups=None):
+    """Run TRC mode and return (xlsx_bytes, n_files, n_pairs)."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = os.path.join(td, 'report.xlsx')
+        _, files, pairs = build_xlsx_trc(folder, title, tmp, truth_dups=truth_dups)
+        with open(tmp, 'rb') as fh:
+            xlsx_bytes = fh.read()
+    return xlsx_bytes, len(files), len(pairs)
 
 
 def run_json(folder, out_pdf, title='Duplicate Classification Report', truth_dups=None):

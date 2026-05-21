@@ -20,7 +20,8 @@ import streamlit as st
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from report import run_json_bytes, run_trc_bytes
+from report import (run_json_bytes, run_trc_bytes,
+                    run_json_xlsx_bytes, run_trc_xlsx_bytes)
 from report_sor import run_sor_bytes, run_sor_xlsx_bytes
 from sor_reader324802a import direction_key_from_genparams
 
@@ -215,28 +216,36 @@ if sor_files:
         reports.append((fname, out_bytes, n_files, n_pairs, prefix))
 elif trc_files:
     subdir = _copy_to_subdir(trc_files, os.path.join(tmp_dir, "trc_input"))
-    if output_format.startswith("Excel"):
-        st.warning("Excel output is currently SOR-only — TRC mode will produce a PDF.")
+    want_xlsx = output_format.startswith("Excel")
+    ext = "xlsx" if want_xlsx else "pdf"
     with st.spinner(f"Running Secret Sauce on {len(trc_files)} TRC files…"):
         try:
-            pdf_bytes, n_files, n_pairs = run_trc_bytes(
-                subdir, title="Secret Sauce — Duplicate Classification")
+            if want_xlsx:
+                out_bytes, n_files, n_pairs = run_trc_xlsx_bytes(
+                    subdir, title="Secret Sauce — Duplicate Classification")
+            else:
+                out_bytes, n_files, n_pairs = run_trc_bytes(
+                    subdir, title="Secret Sauce — Duplicate Classification")
         except Exception as e:
             st.error(str(e))
             st.stop()
-    reports.append(("report.pdf", pdf_bytes, n_files, n_pairs, "TRC"))
+    reports.append((f"report.{ext}", out_bytes, n_files, n_pairs, "TRC"))
 else:
     subdir = _copy_to_subdir(json_files, os.path.join(tmp_dir, "json_input"))
-    if output_format.startswith("Excel"):
-        st.warning("Excel output is currently SOR-only — JSON mode will produce a PDF.")
+    want_xlsx = output_format.startswith("Excel")
+    ext = "xlsx" if want_xlsx else "pdf"
     with st.spinner(f"Running Secret Sauce on {len(json_files)} JSON files…"):
         try:
-            pdf_bytes, n_files, n_pairs = run_json_bytes(
-                subdir, title="Secret Sauce — Duplicate Classification")
+            if want_xlsx:
+                out_bytes, n_files, n_pairs = run_json_xlsx_bytes(
+                    subdir, title="Secret Sauce — Duplicate Classification")
+            else:
+                out_bytes, n_files, n_pairs = run_json_bytes(
+                    subdir, title="Secret Sauce — Duplicate Classification")
         except Exception as e:
             st.error(str(e))
             st.stop()
-    reports.append(("report.pdf", pdf_bytes, n_files, n_pairs, "JSON"))
+    reports.append((f"report.{ext}", out_bytes, n_files, n_pairs, "JSON"))
 
 
 if not reports:

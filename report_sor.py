@@ -360,7 +360,10 @@ def _analyze_sor(folder):
     event_counts = [_interior_event_count(f) for f in files]
     median_events = (sorted(event_counts)[len(event_counts)//2]
                      if event_counts else 0)
-    tie_panel_mode = median_events <= 2
+    # Tie-panel signature requires both indicators: few events AND many
+    # files. The file-count floor protects small same-fiber re-shoot
+    # datasets that also have ~0 events but are NOT tie panels.
+    tie_panel_mode = (median_events <= 2) and (len(files) >= 20)
     print(f'Tie-panel mode: {tie_panel_mode} (median interior events / file = {median_events})')
     batch = _compute_pair_metrics_batch(files, interior_start, interior_end,
                                           tie_panel_mode=tie_panel_mode)
