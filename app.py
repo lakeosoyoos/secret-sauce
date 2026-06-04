@@ -32,7 +32,22 @@ st.set_page_config(
 )
 
 # ----- password gate ----------------------------------------------------
-APP_PASSWORD = st.secrets.get("app_password", "") if hasattr(st, "secrets") else ""
+# Resolve the gate password from either host:
+#   - Railway / generic: APP_PASSWORD environment variable
+#   - Streamlit Cloud:    st.secrets["app_password"]
+# Env var is checked first so Railway never has to touch st.secrets (which
+# raises if no secrets.toml exists). On Streamlit Cloud the env var is unset,
+# so it falls through to st.secrets exactly as before — behaviour unchanged.
+def _resolve_app_password():
+    env_pw = os.environ.get("APP_PASSWORD")
+    if env_pw:
+        return env_pw
+    try:
+        return st.secrets["app_password"]
+    except Exception:
+        return ""
+
+APP_PASSWORD = _resolve_app_password()
 
 if not st.session_state.get("authed"):
     st.title("Secret Sauce")

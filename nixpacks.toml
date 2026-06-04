@@ -1,0 +1,15 @@
+# Railway build config (Nixpacks). IGNORED by Streamlit Community Cloud —
+# only Railway reads this file. Streamlit Cloud continues to use
+# packages.txt + requirements.txt + runtime.txt unchanged.
+#
+# Railway does NOT read packages.txt, so the WeasyPrint system libraries
+# have to be declared here instead. Mirrors packages.txt (minus the
+# glib name that conflicts on trixie — gdk-pixbuf pulls glib transitively).
+
+[phases.setup]
+aptPkgs = [
+  "libpango-1.0-0",
+  "libpangoft2-1.0-0",
+  "libharfbuzz0b",
+  "libgdk-pixbuf-2.0-0",
+]
