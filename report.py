@@ -695,24 +695,15 @@ def _finalize_pairs_multiwl(files, all_pairs_list, regime='production'):
     p_dup_r_arr = np.array([_r_to_p(p.get('r_min')) for p in all_pairs_list],
                            dtype=np.float64)
 
-    # σ-outlier handling per regime:
-    #   production: standard max(σ-outlier, r-tier).
-    #   tie-panel:  r-confirmation gate — σ-outlier capped at 0.49 unless
-    #               r ≥ 0.9 (narrow bulks over-fire σ-outlier).
-    #   all-dups:   bypass σ-outlier entirely — no non-duplicate bulk to
-    #               define an "outlier", so the detector is blind.
-    if regime == 'tie_panel':
-        R_CONFIRM_THRESH = 0.9
-        r_min_arr = np.array([(p.get('r_min') if p.get('r_min') is not None else 0.0)
-                              for p in all_pairs_list], dtype=np.float64)
-        r_confirmed = r_min_arr >= R_CONFIRM_THRESH
-        p_dup_sigma_eff = np.where(r_confirmed, p_dup_sigma_arr,
-                                   np.minimum(p_dup_sigma_arr, 0.49))
-    elif regime in ('all_dups', 'short_panel'):
-        # σ-outlier is unreliable in both regimes:
-        #   all_dups   — no non-duplicate bulk to define an "outlier"
-        #   short_panel — short featureless fibers produce a narrow σ bulk
-        #                 that triggers cascade false positives
+    # σ-outlier handling: ONLY production mode trusts it. Every other regime
+    # bypasses σ-outlier and lets the regime-specific r-ramp drive the verdict.
+    #   tie_panel   — fingerprint-extracted tight r-ramp is the detector;
+    #                 σ-outlier would cascade on shared cable structure
+    #                 (a 2 km tie panel can show 20k σ false positives that
+    #                 a post-fingerprint r≥0.9 gate fails to block).
+    #   all_dups    — no non-duplicate bulk to define an "outlier".
+    #   short_panel — short featureless fibers give a narrow σ bulk that cascades.
+    if regime in ('tie_panel', 'all_dups', 'short_panel'):
         p_dup_sigma_eff = np.zeros_like(p_dup_sigma_arr)
     else:
         p_dup_sigma_eff = p_dup_sigma_arr
@@ -1381,6 +1372,10 @@ def _classify_regime_multiwl(files, batch, wl_list):
     iu = np.triu_indices(n, k=1)
     bulk_sigma = float(np.median(sm[iu])) if len(iu[0]) else 0.0
     bulk_r = float(np.median(rm[iu])) if len(iu[0]) else 0.0
+    # Fraction of pairs with elevated raw r — catches long tie panels whose
+    # median r is low but a large minority of pairs share cable structure
+    # near r ~ 1.0 (see report_sor.py for the CLQTILA rationale).
+    frac_high_r = float((rm[iu] >= 0.95).mean()) if len(iu[0]) else 0.0
     # Compute min interior length across files for the short_panel trigger.
     # Take the canonical-λ length from each file; fall back to the longest λ
     # the file reports if canonical isn't present.
@@ -1404,7 +1399,7 @@ def _classify_regime_multiwl(files, batch, wl_list):
         regime = 'all_dups'
     elif min_L > 0 and min_L < 200 and n >= 50:
         regime = 'short_panel'
-    elif bulk_r >= 0.7:
+    elif bulk_r >= 0.7 or frac_high_r >= 0.30:
         regime = 'tie_panel'
     else:
         regime = 'production'

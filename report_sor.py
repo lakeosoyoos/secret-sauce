@@ -373,6 +373,14 @@ def _analyze_sor(folder):
     iu_raw = np.triu_indices(sigma_raw.shape[0], k=1)
     bulk_sigma = float(np.median(sigma_raw[iu_raw])) if len(iu_raw[0]) else 0.0
     bulk_r = float(np.median(r_raw[iu_raw])) if len(iu_raw[0]) else 0.0
+    # Fraction of pairs with elevated raw r. Catches tie panels whose MEDIAN
+    # r is low (most ports mutually uncorrelated) but a large minority of
+    # pairs share cable structure at r ~ 1.0. Example: 2 km tie panels
+    # (CLQTILA) where median r ~ 0.18 yet ~48% of pairs sit at r >= 0.95
+    # because they run the same route. Median alone misses these and they
+    # cascade into 20k+ false positives in production mode — which also
+    # OOM-kills the renderer (a 20k-row confirmed-duplicate table).
+    frac_high_r = float((r_raw[iu_raw] >= 0.95).mean()) if len(iu_raw[0]) else 0.0
     # Four-regime classifier:
     #   all_dups    — every file IS the same fiber. High r, low σ.
     #   short_panel — many short fibers (< 200 m interior) in a panel where
@@ -382,8 +390,14 @@ def _analyze_sor(folder):
     #                 Sorrento etc.). Bulk r stays LOW on short panels
     #                 because the shared launch+connector signal doesn't
     #                 dominate a featureless interior, so the tie_panel
-    #                 r>=0.7 trigger never fires for these.
-    #   tie_panel   — many long fibers with shared launch+connector signal.
+    #                 trigger never fires for these.
+    #   tie_panel   — many fibers with shared structure. Triggered by EITHER
+    #                 high median r (>=0.7, classic short-launch tie panels
+    #                 like Deming) OR a high FRACTION of elevated-r pairs
+    #                 (>=30% at r>=0.95, long tie panels like CLQTILA whose
+    #                 median is low). Either way fingerprint extraction +
+    #                 the tight ramp sort true re-shoots from shared cable
+    #                 structure, so over-classifying here is self-correcting.
     #   production  — typical case.
     # Order matters: all_dups checked first so a hypothetical all-duplicates
     # short-fiber dataset doesn't get misrouted to short_panel.
@@ -391,11 +405,12 @@ def _analyze_sor(folder):
         regime = 'all_dups'
     elif min_L < 200 and len(files) >= 50:
         regime = 'short_panel'
-    elif bulk_r >= 0.7:
+    elif bulk_r >= 0.7 or frac_high_r >= 0.30:
         regime = 'tie_panel'
     else:
         regime = 'production'
-    print(f'Regime: {regime} (bulk σ={bulk_sigma:.4f} dB, bulk r={bulk_r:.4f})')
+    print(f'Regime: {regime} (bulk σ={bulk_sigma:.4f} dB, '
+          f'bulk r={bulk_r:.4f}, frac high-r={frac_high_r:.2f})')
     tie_panel_mode = (regime == 'tie_panel')
     if regime == 'tie_panel':
         # Re-compute with fingerprint extraction (median-trace subtraction)
@@ -463,25 +478,20 @@ def _analyze_sor(folder):
     p_dup_r = np.array([_r_to_p(p.get('shape_r')) for p in pairs],
                        dtype=np.float64)
 
-    # σ-outlier handling differs by regime:
-    #   production: standard max(σ-outlier, r-tier) combiner.
-    #   tie-panel:  r-confirmation gate — σ-outlier only counts when r ≥ 0.9
-    #               (narrow bulk distributions over-fire σ-outlier).
-    #   all-dups:   bypass σ-outlier entirely — there is no non-duplicate
-    #               bulk to define an "outlier", so the detector is blind.
-    #               Verdict comes from the r-tier alone.
-    if regime == 'tie_panel':
-        R_CONFIRM_THRESH = 0.9
-        r_values = np.array([(p.get('shape_r') if p.get('shape_r') is not None else 0.0)
-                             for p in pairs], dtype=np.float64)
-        r_confirmed = r_values >= R_CONFIRM_THRESH
-        p_dup_sigma_eff = np.where(r_confirmed, p_dup_sigma,
-                                   np.minimum(p_dup_sigma, 0.49))
-    elif regime in ('all_dups', 'short_panel'):
-        # σ-outlier is unreliable in both regimes:
-        #   all_dups   — no non-duplicate bulk to define an "outlier"
-        #   short_panel — short featureless fibers produce a narrow σ bulk
-        #                that triggers cascade false positives
+    # σ-outlier handling: ONLY production mode trusts it. Every other regime
+    # bypasses σ-outlier and lets the regime-specific r-ramp drive the verdict.
+    #   production  — standard max(σ-outlier, r-tier) combiner.
+    #   tie_panel   — bypass σ. The fingerprint-extracted tight r-ramp
+    #                 (0.999-0.9999) is the detector. σ-outlier would cascade
+    #                 on shared cable structure: on a 2 km tie panel (CLQTILA)
+    #                 ~48% of pairs share enough route structure that σ looks
+    #                 like an outlier AND post-fingerprint r still sits above
+    #                 0.9, so the old r≥0.9 confirmation gate let 20k false
+    #                 positives through. True re-shoots survive (post-FP r→1.0).
+    #   all_dups    — no non-duplicate bulk to define an "outlier".
+    #   short_panel — short featureless fibers give a narrow σ bulk that
+    #                 cascades.
+    if regime in ('tie_panel', 'all_dups', 'short_panel'):
         p_dup_sigma_eff = np.zeros_like(p_dup_sigma)
     else:
         p_dup_sigma_eff = p_dup_sigma
@@ -590,6 +600,7 @@ def _analyze_sor(folder):
         'regime': regime,
         'bulk_sigma': bulk_sigma,
         'bulk_r': bulk_r,
+        'frac_high_r': frac_high_r,
     }
 
 
@@ -849,6 +860,7 @@ def build_xlsx_sor(folder, title, out_xlsx):
         ('Regime', analysis.get('regime', 'production')),
         ('Bulk pair-σ (dB)', f'{analysis.get("bulk_sigma", 0.0):.4f}'),
         ('Bulk pair-r',      f'{analysis.get("bulk_r", 0.0):.4f}'),
+        ('Frac pairs r≥0.95', f'{analysis.get("frac_high_r", 0.0):.2f}'),
         ('Likelihood ≥ 99%', n99),
         ('Likelihood ≥ 50%', n50),
         ('Likelihood ≥ 10%', n10),
