@@ -406,41 +406,6 @@ def _compute_pair_metrics_batch_multiwl(files, wl_list, min_samples=50,
     return results
 
 
-def _tie_panel_mode_for(files):
-    """Decide whether to treat the dataset as a tie-panel run, returns
-    (tie_panel_mode_bool, median_event_count).
-
-    Tie-panel signature: many short fibers with no real splices to compare,
-    only connector reflections at both ends. We need both indicators to be
-    confident:
-      - median per-file interior splice-event count ≤ 2
-      - file count ≥ 20  (tray-style upload, not a small calibration set)
-
-    The file-count floor protects small same-fiber re-shoot datasets
-    (TEST DUPE 18 files, newbeta 12 files) that also have ~0 events but
-    are NOT tie panels — they're real-duplicate validation cases that
-    need the standard r-ramp (0.95-0.99) to keep producing the right
-    answers."""
-    def _interior_events(f):
-        # Collect events from whichever wavelength the file carries.
-        per_wl_counts = []
-        for wl, wlblock in (f.get('wl') or {}).items():
-            evts = wlblock.get('events') or []
-            n = sum(1 for e in evts
-                    if not e.get('is_end') and (e.get('dist_km') or 0) > 0.01)
-            per_wl_counts.append(n)
-        # Best (max) wavelength: if any wavelength sees splices, we have
-        # event data. Avoids penalizing files whose 1310 nm trace has no
-        # detected events but 1550 nm does.
-        return max(per_wl_counts) if per_wl_counts else 0
-    counts = [_interior_events(f) for f in files]
-    if not counts:
-        return False, 0
-    median_count = sorted(counts)[len(counts) // 2]
-    is_tie_panel = (median_count <= 2) and (len(files) >= 20)
-    return is_tie_panel, median_count
-
-
 def _shape_tier(r):
     """Bin a Pearson r into a same-fiber tier."""
     if r is None:
@@ -678,7 +643,7 @@ def chart_histogram(all_pairs_list):
     return base64.b64encode(buf.read()).decode('ascii')
 
 
-def _finalize_pairs_multiwl(files, all_pairs_list, tie_panel_mode=False):
+def _finalize_pairs_multiwl(files, all_pairs_list, regime='production'):
     """Run the σ-outlier + r-tier + physical-reality math on a freshly built
     multi-λ pair list. Mutates each pair dict in place (sets `p_dup`,
     `p_dup_r`, `z`, `length_capped`, `events_capped`, `length_delta_m`,
@@ -689,6 +654,13 @@ def _finalize_pairs_multiwl(files, all_pairs_list, tie_panel_mode=False):
         'best_partner'   — {file_name: {'partner', 'sum_score', 'p_dup', 'pair'}}
         'pair_lookup'    — {(sorted(a,b)): pair_dict}
 
+    `regime` is one of:
+        'production' — standard σ-outlier + r-tier (0.95-0.99 ramp).
+        'tie_panel'  — fingerprint-extracted r + tight ramp (0.999-0.9999)
+                       + r-confirmation gate on σ-outlier.
+        'all_dups'   — σ-outlier bypassed (broken on homogeneous data);
+                       widened r-ramp (0.85-0.95) catches every pair.
+
     Used by both build_report (PDF/HTML) and build_xlsx_multiwl (Excel) so
     the two renderers can never drift.
     """
@@ -697,14 +669,18 @@ def _finalize_pairs_multiwl(files, all_pairs_list, tie_panel_mode=False):
     combined = np.array([p['sum_score'] for p in all_pairs_list], dtype=np.float64)
     p_dup_sigma_arr, prob_stats = _outlier_probability(combined)
 
-    # Pearson-shape contribution. Production mode uses the standard ramp
-    # (r=0.95→0, r=0.99→1.0). Tie-panel mode tightens to (r=0.999→0,
-    # r=0.9999→1.0) — see report_sor for full rationale. Real same-fiber
-    # tie-panel re-shoots produce r ≈ 1.0 because the per-fiber Rayleigh
-    # fingerprint dominates once the shared signal is gone; tie-panel
-    # false positives sit well below 0.999.
-    if tie_panel_mode:
+    # Pearson-shape contribution. Per regime:
+    #   production: (0.95 → 0.99)     standard
+    #   tie-panel:  (0.999 → 0.9999)  tightened (residual structure after FP)
+    #   all-dups:   (0.85 → 0.95)     widened — every pair IS a duplicate
+    if regime == 'tie_panel':
         _R_LO, _R_HI = 0.999, 0.9999
+    elif regime == 'all_dups':
+        _R_LO, _R_HI = 0.85, 0.95
+    elif regime == 'short_panel':
+        # Standard production ramp — true same-fiber re-shoots on a short
+        # panel still produce r ≥ 0.95. r-tier is the entire detector here.
+        _R_LO, _R_HI = 0.95, 0.99
     else:
         _R_LO, _R_HI = 0.95, 0.99
     _R_SPAN = _R_HI - _R_LO
@@ -719,16 +695,25 @@ def _finalize_pairs_multiwl(files, all_pairs_list, tie_panel_mode=False):
     p_dup_r_arr = np.array([_r_to_p(p.get('r_min')) for p in all_pairs_list],
                            dtype=np.float64)
 
-    # Tie-panel mode also enables an r-confirmation gate on σ-outlier:
-    # narrow bulk distributions inflate σ-outlier prob even when no real
-    # outlier exists. Require r_min ≥ 0.9 for σ-only flags to claim ≥ 50%.
-    if tie_panel_mode:
+    # σ-outlier handling per regime:
+    #   production: standard max(σ-outlier, r-tier).
+    #   tie-panel:  r-confirmation gate — σ-outlier capped at 0.49 unless
+    #               r ≥ 0.9 (narrow bulks over-fire σ-outlier).
+    #   all-dups:   bypass σ-outlier entirely — no non-duplicate bulk to
+    #               define an "outlier", so the detector is blind.
+    if regime == 'tie_panel':
         R_CONFIRM_THRESH = 0.9
         r_min_arr = np.array([(p.get('r_min') if p.get('r_min') is not None else 0.0)
                               for p in all_pairs_list], dtype=np.float64)
         r_confirmed = r_min_arr >= R_CONFIRM_THRESH
         p_dup_sigma_eff = np.where(r_confirmed, p_dup_sigma_arr,
                                    np.minimum(p_dup_sigma_arr, 0.49))
+    elif regime in ('all_dups', 'short_panel'):
+        # σ-outlier is unreliable in both regimes:
+        #   all_dups   — no non-duplicate bulk to define an "outlier"
+        #   short_panel — short featureless fibers produce a narrow σ bulk
+        #                 that triggers cascade false positives
+        p_dup_sigma_eff = np.zeros_like(p_dup_sigma_arr)
     else:
         p_dup_sigma_eff = p_dup_sigma_arr
 
@@ -834,10 +819,9 @@ def _finalize_pairs_multiwl(files, all_pairs_list, tie_panel_mode=False):
 
 
 def build_report(files, all_pairs_list, truth_dups, out_path,
-                 title='Duplicate Classification Report', tie_panel_mode=False):
+                 title='Duplicate Classification Report', regime='production'):
     truth_dups = truth_dups or set()
-    fin = _finalize_pairs_multiwl(files, all_pairs_list,
-                                  tie_panel_mode=tie_panel_mode)
+    fin = _finalize_pairs_multiwl(files, all_pairs_list, regime=regime)
     pair_lookup  = fin['pair_lookup']
     best_partner = fin['best_partner']
     p_dup_arr    = fin['p_dup_arr']
@@ -1127,7 +1111,7 @@ def html_to_pdf(html_path, pdf_path):
 
 def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
                        title='Duplicate Classification Report',
-                       wl_list=None, tie_panel_mode=False):
+                       wl_list=None, regime='production'):
     global WL_ORDER
     """Multi-wavelength (JSON/TRC) Excel renderer. Mirrors build_xlsx_sor's
     6-sheet layout, but every per-λ metric becomes its own column.
@@ -1148,8 +1132,7 @@ def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
     truth_dups = truth_dups or set()
     wl_list = list(wl_list) if wl_list else list(WL_ORDER)
 
-    fin = _finalize_pairs_multiwl(files, all_pairs_list,
-                                  tie_panel_mode=tie_panel_mode)
+    fin = _finalize_pairs_multiwl(files, all_pairs_list, regime=regime)
     pair_lookup  = fin['pair_lookup']
     best_partner = fin['best_partner']
     p_dup_arr    = fin['p_dup_arr']
@@ -1185,7 +1168,7 @@ def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
         ('Likelihood ≥ 99%',  n99),
         ('Likelihood ≥ 50%',  n50),
         ('Likelihood ≥ 10%',  n10),
-        ('Tie-panel mode',    'Yes' if tie_panel_mode else 'No'),
+        ('Regime',            regime),
         ('Interior window (m)', f'{_INTERIOR_MIN_M:.0f}–{_INTERIOR_MAX_M:.0f}'),
     ]
     for i, (k, v) in enumerate(rows, start=4):
@@ -1370,14 +1353,78 @@ def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
     return out_xlsx
 
 
+def _classify_regime_multiwl(files, batch, wl_list):
+    """Three-regime classifier (matches the SOR side):
+
+        'production' — bulk pair-r low (~0.3). σ-outlier detector works.
+        'tie_panel'  — bulk pair-r high (~0.95) AND bulk pair-σ ≥ 0.10 dB.
+                       Many fibers sharing launch+connector signal.
+        'all_dups'   — bulk pair-r high (~0.95) AND bulk pair-σ < 0.10 dB.
+                       Every file is the same physical fiber.
+
+    Uses the canonical wavelength's σ/r matrix (1550 nm preferred, else the
+    median wavelength). Replaces the prior interior-event count + 20-file
+    floor heuristic — that test was a band-aid that failed when small
+    homogeneous-duplicate datasets (renoduplicates, newbeta) needed
+    production-style detection."""
+    if 1550 in wl_list:
+        canonical = 1550
+    else:
+        canonical = sorted(wl_list)[len(wl_list) // 2]
+    if canonical not in batch:
+        return 'production', 0.0, 0.0
+    sm = batch[canonical]['sigma_matrix']
+    rm = batch[canonical]['r_matrix']
+    n = sm.shape[0]
+    if n < 2:
+        return 'production', 0.0, 0.0
+    iu = np.triu_indices(n, k=1)
+    bulk_sigma = float(np.median(sm[iu])) if len(iu[0]) else 0.0
+    bulk_r = float(np.median(rm[iu])) if len(iu[0]) else 0.0
+    # Compute min interior length across files for the short_panel trigger.
+    # Take the canonical-λ length from each file; fall back to the longest λ
+    # the file reports if canonical isn't present.
+    file_lengths = []
+    for f in files:
+        wl_rec = (f.get('wl') or {}).get(canonical) or {}
+        L = wl_rec.get('length_m')
+        if not L:
+            # Try any λ that does report a length
+            for wl_key, wlrec in (f.get('wl') or {}).items():
+                if (wlrec or {}).get('length_m'):
+                    L = wlrec['length_m']
+                    break
+        if L:
+            file_lengths.append(float(L))
+    min_L = min(file_lengths) if file_lengths else 0.0
+    # Same four-regime taxonomy as the SOR side — see report_sor.py for
+    # full rationale. Order matters: all_dups checked first so a
+    # hypothetical all-duplicates short-fiber dataset doesn't get misrouted.
+    if bulk_r >= 0.7 and bulk_sigma < 0.10:
+        regime = 'all_dups'
+    elif min_L > 0 and min_L < 200 and n >= 50:
+        regime = 'short_panel'
+    elif bulk_r >= 0.7:
+        regime = 'tie_panel'
+    else:
+        regime = 'production'
+    return regime, bulk_sigma, bulk_r
+
+
 def _build_pairs_multiwl(files, wl_list, truth_dups):
     """Compute the all_pairs list using the batch metric helper. Returns
-    (all_pairs, tie_panel_mode_bool)."""
-    tie_panel_mode, median_evts = _tie_panel_mode_for(files)
-    print(f'Tie-panel mode: {tie_panel_mode} '
-          f'(median interior events / file = {median_evts})')
-    batch = _compute_pair_metrics_batch_multiwl(files, wl_list,
-                                                  tie_panel_mode=tie_panel_mode)
+    (all_pairs, regime). `regime` is 'production' / 'tie_panel' / 'all_dups'."""
+    # Two-pass: compute raw metrics, classify, then re-compute with
+    # fingerprint extraction only if the dataset is a tie panel.
+    batch_raw = _compute_pair_metrics_batch_multiwl(files, wl_list,
+                                                    tie_panel_mode=False)
+    regime, bulk_sigma, bulk_r = _classify_regime_multiwl(files, batch_raw, wl_list)
+    print(f'Regime: {regime} (bulk σ={bulk_sigma:.4f} dB, bulk r={bulk_r:.4f})')
+    if regime == 'tie_panel':
+        batch = _compute_pair_metrics_batch_multiwl(files, wl_list,
+                                                    tie_panel_mode=True)
+    else:
+        batch = batch_raw
     # Build a (file_index_i, file_index_j) -> per-wavelength scalar lookup.
     n = len(files)
     pairs_by_key = {}
@@ -1404,7 +1451,7 @@ def _build_pairs_multiwl(files, wl_list, truth_dups):
         all_pairs.append({'a': a['name'], 'b': b['name'],
                           'score': sc, 'sum_score': sum_sc, 'is_dup': is_dup,
                           'shape_r': rs, 'r_min': r_min})
-    return all_pairs, tie_panel_mode
+    return all_pairs, regime
 
 
 def build_json_html(folder, title='Duplicate Classification Report', truth_dups=None):
@@ -1412,10 +1459,10 @@ def build_json_html(folder, title='Duplicate Classification Report', truth_dups=
     if not paths:
         raise RuntimeError(f'No JSON files found in {folder}')
     files = [load_file(p) for p in paths]
-    all_pairs, tie_panel_mode = _build_pairs_multiwl(files, WL_ORDER, truth_dups)
+    all_pairs, regime = _build_pairs_multiwl(files, WL_ORDER, truth_dups)
     out_html_tmp = os.path.join(folder, '_tmp_report.html')
     build_report(files, all_pairs, truth_dups or set(), out_html_tmp,
-                 title=title, tie_panel_mode=tie_panel_mode)
+                 title=title, regime=regime)
     with open(out_html_tmp, 'r', encoding='utf-8') as fh:
         html = fh.read()
     try:
@@ -1437,10 +1484,9 @@ def build_xlsx_json(folder, title, out_xlsx, truth_dups=None):
     if not paths:
         raise RuntimeError(f'No JSON files found in {folder}')
     files = [load_file(p) for p in paths]
-    all_pairs, tie_panel_mode = _build_pairs_multiwl(files, WL_ORDER, truth_dups)
+    all_pairs, regime = _build_pairs_multiwl(files, WL_ORDER, truth_dups)
     build_xlsx_multiwl(files, all_pairs, truth_dups or set(), out_xlsx,
-                       title=title, wl_list=WL_ORDER,
-                       tie_panel_mode=tie_panel_mode)
+                       title=title, wl_list=WL_ORDER, regime=regime)
     return out_xlsx, files, all_pairs
 
 
@@ -1470,14 +1516,14 @@ def build_trc_html(folder, title='Duplicate Classification Report', truth_dups=N
     for f in files[1:]:
         common &= set(f['wl'].keys())
     wl_list = sorted(common) or WL_ORDER
-    all_pairs, tie_panel_mode = _build_pairs_multiwl(files, wl_list, truth_dups)
+    all_pairs, regime = _build_pairs_multiwl(files, wl_list, truth_dups)
     # Override module-level WL_ORDER for rendering when TRC carries fewer/other λ
     saved = WL_ORDER
     WL_ORDER = wl_list
     out_html_tmp = os.path.join(folder, '_tmp_report.html')
     try:
         build_report(files, all_pairs, truth_dups or set(), out_html_tmp,
-                     title=title, tie_panel_mode=tie_panel_mode)
+                     title=title, regime=regime)
         with open(out_html_tmp, 'r', encoding='utf-8') as fh:
             html = fh.read()
     finally:
@@ -1506,10 +1552,9 @@ def build_xlsx_trc(folder, title, out_xlsx, truth_dups=None):
     for f in files[1:]:
         common &= set(f['wl'].keys())
     wl_list = sorted(common) or WL_ORDER
-    all_pairs, tie_panel_mode = _build_pairs_multiwl(files, wl_list, truth_dups)
+    all_pairs, regime = _build_pairs_multiwl(files, wl_list, truth_dups)
     build_xlsx_multiwl(files, all_pairs, truth_dups or set(), out_xlsx,
-                       title=title, wl_list=wl_list,
-                       tie_panel_mode=tie_panel_mode)
+                       title=title, wl_list=wl_list, regime=regime)
     return out_xlsx, files, all_pairs
 
 
