@@ -1101,7 +1101,10 @@ def html_to_pdf_bytes(html_str, base_url=None):
              f'--print-to-pdf={pdf_path}',
              '--print-to-pdf-no-header', '--no-pdf-header-footer',
              'file://' + html_path],
-            capture_output=True, timeout=180)
+            capture_output=True, timeout=180,
+            # no flashing console window when the windowed desktop app shells
+            # out to Chrome/Edge on Windows (no-op elsewhere)
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         if res.returncode != 0:
             raise RuntimeError(f'Chrome failed: {res.stderr.decode(errors="ignore")[:400]}')
         with open(pdf_path, 'rb') as fh:
@@ -1632,7 +1635,8 @@ def main():
              f'--print-to-pdf={os.path.abspath(pdf)}',
              '--print-to-pdf-no-header', '--no-pdf-header-footer',
              'file://' + os.path.abspath(out_html)],
-            capture_output=True, timeout=180)
+            capture_output=True, timeout=180,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         if result.returncode == 0:
             print(f'   PDF: {pdf}')
 

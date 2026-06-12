@@ -30,10 +30,29 @@ _LIVE_FILES = {
 }
 
 
+def _smoke_check_engine(folder):
+    """Re-invoke ourselves in an isolated subprocess to confirm the freshly
+    fetched engine actually IMPORTS. Catches a bad push to main that is valid
+    Python but broken at import (missing symbol, bad top-level code) — the
+    content-only check can't see that. Returns True if the engine imported.
+    Only meaningful when frozen (we re-run the .exe); in dev we skip it."""
+    if not getattr(sys, "frozen", False):
+        return True
+    import subprocess
+    env = dict(os.environ, SS_SMOKE_CHECK=folder)
+    try:
+        r = subprocess.run([sys.executable], env=env,
+                           capture_output=True, timeout=90)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def _fetch_latest_code():
-    """Download the live engine+UI into a cache dir. All-or-nothing: only swap
-    in the cache if EVERY file downloaded and looks like real Python, otherwise
-    return None so we use the bundled copies. Returns the cache dir or None."""
+    """Download the live engine+UI into a cache dir and validate it before use.
+    All-or-nothing: only swap in the cache if EVERY file downloaded, COMPILES
+    (no syntax errors), and the engine IMPORTS cleanly. On any failure return
+    None so we fall back to the bundled copies. Returns the cache dir or None."""
     import urllib.request
     staging = tempfile.mkdtemp(prefix="ss_fetch_")
     try:
@@ -45,8 +64,13 @@ def _fetch_latest_code():
             # error page / truncated download being treated as code)
             if not data or b"def " not in data:
                 raise ValueError(f"unexpected content for {repo_path}")
+            # syntax check — catches the most common "bad push breaks everyone"
+            compile(data, local_name, "exec")
             with open(os.path.join(staging, local_name), "wb") as fh:
                 fh.write(data)
+        # import smoke check — confirms the fetched engine actually loads
+        if not _smoke_check_engine(staging):
+            raise RuntimeError("fetched engine failed import smoke check")
         cache = os.path.join(os.path.expanduser("~"), ".secretsauce", "engine")
         os.makedirs(cache, exist_ok=True)
         for local_name in _LIVE_FILES:
@@ -125,8 +149,48 @@ def _open_browser():
     webbrowser.open("http://localhost:8501")
 
 
+def _smoke_check_mode():
+    """If launched with SS_SMOKE_CHECK=<dir>, this is the isolated subprocess
+    from _smoke_check_engine — just try to import the engine from <dir> and
+    exit 0 (ok) or 1 (broken). Must run before any normal startup work."""
+    folder = os.environ.get("SS_SMOKE_CHECK")
+    if not folder:
+        return False
+    try:
+        sys.path.insert(0, folder)
+        import importlib
+        for mod in ("sor_reader324802a", "trc_parser", "report", "report_sor"):
+            importlib.import_module(mod)
+        os._exit(0)
+    except Exception:
+        os._exit(1)
+    return True
+
+
+def _already_running():
+    """True if a SecretSauce server is already serving on 8501 — avoids a
+    second double-click starting a dead second process and opening a stale tab."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8501/_stcore/health",
+                                    timeout=2) as r:
+            return r.read().decode().strip() == "ok"
+    except Exception:
+        return False
+
+
 def main():
+    # Isolated smoke-check subprocess (engine import validation) — exits early.
+    _smoke_check_mode()
+
     _redirect_output_to_log()
+
+    # If the app is already running (tech double-clicked twice), just open the
+    # existing instance instead of starting a dead second server.
+    if _already_running():
+        webbrowser.open("http://localhost:8501")
+        return
+
     _silence_first_run_prompt()
 
     # Pull the latest code; use it if the fetch fully succeeded, else the

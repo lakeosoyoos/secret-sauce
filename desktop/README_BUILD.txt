@@ -78,14 +78,28 @@ HOW A TECH USES IT
      C:\Users\<name>\.secretsauce\secretsauce.log
 
 
+FIRST-RUN STEPS FOR A TECH (canonical sequence — keep these identical
+everywhere you publish the link):
+  1. Download the zip.
+  2. Right-click the zip -> Properties -> tick "Unblock" -> OK.
+  3. Right-click the zip -> Extract All.
+  4. Open the SecretSauce folder -> double-click SecretSauce.exe.
+  5. SmartScreen "Windows protected your PC" -> More info -> Run anyway.
+
 NOTES / GOTCHAS
 ---------------
-  * First launch may be slow (a few seconds) while it unpacks. Normal.
-  * Windows SmartScreen may warn "Windows protected your PC" for an unsigned
-    app. Click "More info" -> "Run anyway". To remove the warning entirely you
-    need a code-signing certificate (separate purchase).
-  * Output is Excel by default. PDF works only if Google Chrome is installed
-    on the machine (the build excludes the PDF engine's heavy native libs).
-  * The engine here is a SNAPSHOT of the cloud version. When the cloud engine
-    is updated (e.g. the new uniqueness gate), re-copy report.py / report_sor.py
-    into this folder and rebuild to keep them in sync.
+  * First launch is slow (10-30s) and shows NO window while it unpacks/boots —
+    that's normal, not a freeze. A browser tab opens on its own when ready.
+  * Windows SmartScreen warns once for an unsigned app (step 5 above). To
+    remove it entirely you need a code-signing certificate (separate purchase).
+  * Output is Excel by default. PDF works if Chrome OR Microsoft Edge is
+    installed — Edge ships with Windows 10/11, so PDF works on virtually any
+    machine. (The build excludes the heavyweight PDF library and renders via a
+    Chromium browser instead.)
+  * AUTO-UPDATE: on launch the app pulls the latest report.py / report_sor.py /
+    sor_reader / trc_parser / desktop_app.py from the repo's main branch,
+    validates them (compile + import smoke check), and runs those — so engine
+    changes go live on every machine on the next launch with no re-download.
+    The bundled copies here are the OFFLINE fallback. Only changes to the
+    bundled dependencies or to launcher.py itself require a fresh download +
+    rebuild. The sidebar shows whether the running code is "latest" or "bundled".

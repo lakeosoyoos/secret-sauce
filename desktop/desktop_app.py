@@ -129,11 +129,23 @@ ext = "xlsx" if want_xlsx else "pdf"
 
 # ----- helpers ----------------------------------------------------------
 def _stage_flat(paths):
-    """Copy a list of files into a fresh flat temp dir (engine functions
-    glob a single directory, non-recursively)."""
+    """Copy a list of files into a fresh flat temp dir (engine functions glob a
+    single directory, non-recursively). De-duplicates basenames so two files
+    with the same name in different subfolders don't silently overwrite each
+    other (OTDR exports reuse names per job folder). SOR grouping keys off the
+    file's internal GenParams, not the filename, so renaming is safe."""
     td = tempfile.mkdtemp(prefix="ss_stage_")
+    used = set()
     for p in paths:
-        shutil.copy(p, os.path.join(td, os.path.basename(p)))
+        base = os.path.basename(p)
+        dest = base
+        i = 1
+        while dest.lower() in used:
+            stem, ext = os.path.splitext(base)
+            dest = f"{stem}__{i}{ext}"
+            i += 1
+        used.add(dest.lower())
+        shutil.copy(p, os.path.join(td, dest))
     return td
 
 
