@@ -7,7 +7,8 @@
 # Zip the dist/SecretSauce folder to hand to a tech; they extract and run
 # SecretSauce.exe inside it.
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import (collect_all, collect_submodules,
+                                     collect_data_files)
 
 datas, binaries, hiddenimports = [], [], []
 
@@ -32,8 +33,30 @@ hiddenimports += ["report", "report_sor", "sor_reader324802a", "trc_parser",
                   "tkinter", "tkinter.filedialog"]
 
 # pkg_resources (pulled in by Streamlit) vendors several packages that
-# PyInstaller's runtime hook can fail to bundle, giving
-# "The 'appdirs' package is required" at launch. List them explicitly.
+# PyInstaller's runtime hook can fail to bundle, giving e.g.
+# "the jaraco package is required" at launch. Bundle them three ways so it
+# cannot slip through:
+#   1) the whole pkg_resources/setuptools tree, INCLUDING its _vendor copies
+#      (jaraco.*, packaging, platformdirs...) — what the extern importer reaches
+#      for first;
+#   2) the same packages installed top-level (requirements-desktop.txt) as the
+#      extern importer's fallback;
+#   3) explicit hiddenimports as a final belt-and-suspenders.
+# The CI boot self-test actually launches the .exe and fails the build if any of
+# this is still wrong, so a packaging gap can never reach a tech.
+hiddenimports += collect_submodules("pkg_resources")
+hiddenimports += collect_submodules("setuptools")
+datas += collect_data_files("pkg_resources")
+for _pkg in ["jaraco", "jaraco.text", "jaraco.functools", "jaraco.context",
+             "more_itertools", "packaging", "platformdirs", "appdirs",
+             "ordered_set"]:
+    try:
+        _d, _b, _h = collect_all(_pkg)
+        datas += _d
+        binaries += _b
+        hiddenimports += _h
+    except Exception:
+        pass   # not installed top-level — the vendored copy (1) still covers it
 hiddenimports += ["appdirs", "jaraco.text", "jaraco.functools",
                   "jaraco.context", "more_itertools", "packaging",
                   "platformdirs", "pkg_resources"]

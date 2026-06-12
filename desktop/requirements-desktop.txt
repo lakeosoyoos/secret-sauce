@@ -6,6 +6,21 @@
 # 65.5.1 keeps the lenient parsing PyInstaller's pkg_resources hook needs.
 # (Validated on a Mac test build — same fix applies on Windows.)
 setuptools==65.5.1
+# pkg_resources (pulled in by Streamlit) imports several VENDORED packages at
+# startup — jaraco.*, more-itertools, packaging, platformdirs, appdirs. On a
+# clean build machine these exist ONLY inside setuptools' _vendor tree, so
+# PyInstaller can miss them and the packaged app dies at launch with
+# "the jaraco package is required". Installing them as real top-level packages
+# makes them collectable at build time AND gives pkg_resources' extern importer
+# a working fallback at runtime. The CI boot self-test is the backstop.
+jaraco.text
+jaraco.functools
+jaraco.context
+more-itertools
+packaging
+platformdirs
+appdirs
+ordered-set
 streamlit
 numpy
 scipy

@@ -45,6 +45,43 @@ jobs:
         run: pyinstaller SecretSauce.spec --noconfirm --clean
         shell: cmd
 
+      # ----------------------------------------------------------------------
+      # BOOT SELF-TEST — the guardrail. Actually launch the packaged .exe on
+      # this clean Windows runner and confirm it SERVES. If it can't start
+      # (missing hiddenimport like jaraco, bad vendoring, etc.) the app never
+      # answers /_stcore/health, this step fails, and the job stops BEFORE the
+      # Release is updated — so a non-launching build can never reach a tech.
+      # ----------------------------------------------------------------------
+      - name: Boot self-test (must serve, or fail the build)
+        shell: pwsh
+        run: |
+          $exe = "dist/SecretSauce/SecretSauce.exe"
+          if (-not (Test-Path $exe)) { Write-Error "exe not found: $exe"; exit 1 }
+          Write-Host "Launching $exe ..."
+          $proc = Start-Process -FilePath $exe -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Seconds 2
+            if ($proc.HasExited) { Write-Host "process exited early (code $($proc.ExitCode))"; break }
+            try {
+              $r = Invoke-WebRequest -Uri "http://127.0.0.1:8501/_stcore/health" `
+                                     -UseBasicParsing -TimeoutSec 2
+              if ($r.Content.Trim() -eq "ok") { $ok = $true; break }
+            } catch { }
+          }
+          # clean up the app + any helper processes it spawned
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          Get-Process -Name SecretSauce -ErrorAction SilentlyContinue |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+          if (-not $ok) {
+            Write-Host "----- secretsauce.log (if any) -----"
+            $log = Join-Path $env:USERPROFILE ".secretsauce/secretsauce.log"
+            if (Test-Path $log) { Get-Content $log -Tail 100 }
+            Write-Error "BOOT SELF-TEST FAILED: packaged app did not serve /_stcore/health. Not publishing."
+            exit 1
+          }
+          Write-Host "BOOT SELF-TEST PASSED: app served /_stcore/health = ok"
+
       - name: Zip the bundle
         run: powershell -Command "Compress-Archive -Path dist/SecretSauce -DestinationPath SecretSauce-Windows.zip -Force"
         shell: cmd
