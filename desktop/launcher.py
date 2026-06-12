@@ -60,8 +60,21 @@ def _base_dir():
 
 
 def _open_browser():
-    # give Streamlit a few seconds to bind the port, then open the UI
-    time.sleep(4)
+    # Wait until the server actually answers before opening the browser.
+    # A fixed delay isn't enough: the FIRST cold launch unpacks a few hundred
+    # MB and Streamlit can take 10-30s to bind, which would otherwise show a
+    # "connection error" page. Poll the health endpoint for up to ~90s, then
+    # open. (Fallback: open anyway so a slow machine still gets the page.)
+    import urllib.request
+    health = "http://127.0.0.1:8501/_stcore/health"
+    for _ in range(180):
+        try:
+            with urllib.request.urlopen(health, timeout=1) as r:
+                if r.read().decode().strip() == "ok":
+                    break
+        except Exception:
+            pass
+        time.sleep(0.5)
     webbrowser.open("http://localhost:8501")
 
 
