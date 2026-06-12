@@ -50,8 +50,10 @@ HOW TO BUILD THE WINDOWS .EXE
 -----------------------------
 Do this ON a Windows machine (PyInstaller cannot cross-compile from Mac).
 
-  1. Install Python 3.11 or 3.12 (64-bit) from python.org. During install,
-     tick "Add Python to PATH".
+  1. Install Python 3.11 (64-bit) from python.org — use 3.11, NOT 3.12. We pin
+     setuptools 65.5.1, whose pkg_resources uses pkgutil.ImpImporter, which 3.12
+     removed (the packaged app would die at launch). During install, tick "Add
+     Python to PATH".
   2. Copy this whole SecretSauce-Desktop folder onto the Windows machine.
   3. Open the folder, double-click  build.bat  (or run it from a terminal).
      It creates a clean environment, installs everything, and builds the app.
