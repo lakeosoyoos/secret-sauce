@@ -1,0 +1,17 @@
+# Desktop build dependencies (Windows, Python 3.11 or 3.12).
+#
+# IMPORTANT: setuptools is pinned. Newer setuptools (71+) makes pkg_resources
+# strict about version parsing, which crashes the PACKAGED app at launch with
+# "pkg_resources.extern.packaging.version.InvalidVersion: '.../SecretSauce'".
+# 65.5.1 keeps the lenient parsing PyInstaller's pkg_resources hook needs.
+# (Validated on a Mac test build — same fix applies on Windows.)
+setuptools==65.5.1
+streamlit
+numpy
+scipy
+matplotlib
+openpyxl
+pyinstaller
+# Note: weasyprint is intentionally NOT listed — the desktop build is Excel-
+# first and excludes it (see SecretSauce.spec). PDF still works if Chrome is
+# installed on the machine.

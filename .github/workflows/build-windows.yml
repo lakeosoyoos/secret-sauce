@@ -1,0 +1,54 @@
+name: Build Windows EXE
+
+# Builds the Secret Sauce desktop app into a Windows x86-64 .exe on a real
+# Windows runner, then uploads it as a downloadable artifact. No local Windows
+# machine needed — trigger from the GitHub "Actions" tab (Run workflow), or it
+# runs automatically whenever anything in desktop/ changes.
+
+on:
+  workflow_dispatch:        # manual "Run workflow" button
+  push:
+    paths:
+      - "desktop/**"
+      - ".github/workflows/build-windows.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12 (x86-64)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-desktop.txt
+          REM Pin setuptools LAST so the runtime pkg_resources is the lenient
+          REM 65.5.1 (newer setuptools crashes the packaged app at launch).
+          python -m pip install "setuptools==65.5.1"
+        shell: cmd
+
+      - name: Build SecretSauce.exe
+        run: pyinstaller SecretSauce.spec --noconfirm --clean
+        shell: cmd
+
+      - name: Zip the bundle
+        run: powershell -Command "Compress-Archive -Path dist/SecretSauce -DestinationPath SecretSauce-Windows.zip -Force"
+        shell: cmd
+
+      - name: Upload the Windows app as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SecretSauce-Windows
+          path: desktop/SecretSauce-Windows.zip
+          retention-days: 30

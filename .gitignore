@@ -23,3 +23,10 @@ venv/
 
 # Temp
 *.tmp
+
+# desktop PyInstaller build artifacts
+desktop/build/
+desktop/dist/
+desktop/build_env/
+desktop/__pycache__/
+desktop/*.zip
