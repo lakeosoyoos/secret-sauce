@@ -31,40 +31,11 @@ st.set_page_config(
     layout="wide",
 )
 
-# ----- password gate ----------------------------------------------------
-# Resolve the gate password from either host:
-#   - Railway / generic: APP_PASSWORD environment variable
-#   - Streamlit Cloud:    st.secrets["app_password"]
-# Env var is checked first so Railway never has to touch st.secrets (which
-# raises if no secrets.toml exists). On Streamlit Cloud the env var is unset,
-# so it falls through to st.secrets exactly as before — behaviour unchanged.
-def _resolve_app_password():
-    env_pw = os.environ.get("APP_PASSWORD")
-    if env_pw:
-        return env_pw
-    try:
-        return st.secrets["app_password"]
-    except Exception:
-        return ""
-
-APP_PASSWORD = _resolve_app_password()
-
-if not st.session_state.get("authed"):
-    st.title("Secret Sauce")
-    if not APP_PASSWORD:
-        st.error(
-            "App password is not configured. Set `app_password` in Streamlit "
-            "Cloud → app **Settings** → **Secrets**, or in a local "
-            "`.streamlit/secrets.toml` for development."
-        )
-        st.stop()
-    pwd = st.text_input("Password", type="password")
-    if pwd == APP_PASSWORD:
-        st.session_state["authed"] = True
-        st.rerun()
-    elif pwd:
-        st.error("Incorrect password.")
-    st.stop()
+# No in-app password gate. It was removed because a mid-run container restart
+# (e.g. an out-of-memory kill on a large job) wipes st.session_state, which
+# dropped the "authed" flag and re-prompted for the password right as the
+# report was about to render. Access is controlled at the hosting layer
+# (Railway / Streamlit Cloud) instead of in the app.
 
 st.title("Secret Sauce")
 st.caption(
