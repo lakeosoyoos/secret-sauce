@@ -94,8 +94,27 @@ if not folder or not os.path.isdir(folder):
     st.stop()
 
 
+def _is_otdr_json(path):
+    """True only if this .json is actually an OTDR trace. The engine's
+    report.load_file() requires d['Measurement']['OtdrMeasurements'], so a real
+    trace file always contains that literal key; a stray results/config json
+    (e.g. a leftover rmse_results.json sitting next to the traces) does not.
+    Byte-substring sniff — no full JSON parse, so it stays cheap even on a
+    1000+ file folder, and it can never drop a real trace (the engine couldn't
+    read one without that key anyway)."""
+    try:
+        with open(path, "rb") as fh:
+            return b"OtdrMeasurements" in fh.read()
+    except Exception:
+        return False
+
+
 # ----- inventory (recursive) --------------------------------------------
+# Non-trace .json files (results/config exports) are ignored so they can't trip
+# the one-type-per-run guard below. SOR/TRC are bucketed by extension (stray
+# files with those OTDR-specific extensions don't occur in the field).
 sor_files, trc_files, json_files = [], [], []
+skipped_json = 0
 for root, _dirs, files in os.walk(folder):
     for f in files:
         low = f.lower()
@@ -105,10 +124,17 @@ for root, _dirs, files in os.walk(folder):
         elif low.endswith(".trc"):
             trc_files.append(full)
         elif low.endswith(".json"):
-            json_files.append(full)
+            if _is_otdr_json(full):
+                json_files.append(full)
+            else:
+                skipped_json += 1   # stray results/config json — not a trace
 
 st.success(f"Found **{len(sor_files)} SOR** · **{len(trc_files)} TRC** · "
            f"**{len(json_files)} JSON** in this folder (and subfolders).")
+if skipped_json:
+    st.caption(f"ℹ️ Ignored {skipped_json} non-trace .json file"
+               f"{'s' if skipped_json != 1 else ''} (e.g. a results or config "
+               f"file) so it won't block the run.")
 
 n_kinds = sum(bool(x) for x in (sor_files, trc_files, json_files))
 if n_kinds == 0:
