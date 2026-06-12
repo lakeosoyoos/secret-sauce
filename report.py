@@ -801,6 +801,53 @@ def _finalize_pairs_multiwl(files, all_pairs_list, regime='production'):
     p_dup_arr = np.where(physical_violation,
                          np.minimum(p_dup_raw_arr, LEN_CAP),
                          p_dup_raw_arr)
+
+    # ---- Uniqueness ('gap-ratio') FLAG (production only) -------------------
+    # Multi-λ analogue of the SOR flag: a ribbon/helix neighbour sits in a
+    # graded family of same-clock-position fibres (never uniquely close to one
+    # partner); a real duplicate is a lone standout. Per λ:
+    #   gap = max( σ(A,B)/σ(A,next-best) , σ(A,B)/σ(B,next-best) )
+    # then take the MIN across wavelengths (unique at ANY λ → not flagged).
+    # FLAG ONLY — the likelihood is never changed; we just mark pairs shown as
+    # duplicates that look like cable neighbours so a tech can verify. Runs in
+    # production regime only, with enough fibres for "next-best" to mean anything.
+    GAP_THRESH = 0.35
+    GATE_MIN_FILES = 20
+    gate_on = (regime == 'production') and (len(files) >= GATE_MIN_FILES)
+    from collections import defaultdict as _dd
+    _sig = _dd(lambda: _dd(dict))   # name -> wl -> {other: σ}
+    for p in all_pairs_list:
+        for wl, s in p['score'].items():
+            if s is not None:
+                _sig[p['a']][wl][p['b']] = s
+                _sig[p['b']][wl][p['a']] = s
+    _b1, _b2 = {}, {}                # best + 2nd-best σ per (fibre, λ)
+    for name in _sig:
+        for wl in _sig[name]:
+            srt = sorted(_sig[name][wl].items(), key=lambda kv: kv[1])
+            if srt:
+                _b1[(name, wl)] = srt[0]                       # (other, σ)
+                _b2[(name, wl)] = srt[1][1] if len(srt) > 1 else np.inf
+    for i, p in enumerate(all_pairs_list):
+        a, b = p['a'], p['b']
+        per_wl = []
+        for wl, s in p['score'].items():
+            if s is None:
+                continue
+            b1a, b1b = _b1.get((a, wl)), _b1.get((b, wl))
+            if not b1a or not b1b:
+                continue
+            ba = _b2[(a, wl)] if b1a[0] == b else b1a[1]       # next-best, A excl B
+            bb = _b2[(b, wl)] if b1b[0] == a else b1b[1]
+            ra = s / ba if ba > 0 else np.inf
+            rb = s / bb if bb > 0 else np.inf
+            per_wl.append(max(ra, rb))
+        gr = float(min(per_wl)) if per_wl else None             # MIN across λ
+        p['gap_ratio'] = gr
+        flagged = (gate_on and p_dup_arr[i] > 0.5
+                   and gr is not None and gr > GAP_THRESH)
+        p['possible_neighbor'] = bool(flagged)
+
     for p, pd, pdr, z, lc, ec in zip(all_pairs_list, p_dup_arr, p_dup_r_arr,
                                      prob_stats['z'], length_violation,
                                      events_violation):
@@ -1191,6 +1238,8 @@ def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
         ('Likelihood ≥ 50%',  n50),
         ('Likelihood ≥ 10%',  n10),
         ('Regime',            regime),
+        ('Possible cable-neighbor flags',
+         sum(1 for p in all_pairs_list if p.get('possible_neighbor'))),
         ('Interior window (m)', f'{_INTERIOR_MIN_M:.0f}–{_INTERIOR_MAX_M:.0f}'),
     ]
     for i, (k, v) in enumerate(rows, start=4):
@@ -1299,6 +1348,31 @@ def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
     cw = ([18, 18, 13] + [22] * len(wl_list)
           + [22] * len(wl_list) + [16] * len(wl_list) + [22])
     _write_table(ws, headers, rows_data, col_widths=cw)
+
+    # ---------- Possible cable-neighbors (uniqueness flag, review-only) ------
+    # FLAG only — likelihood unchanged; the call is the tech's. Lists pairs shown
+    # as duplicates that are not uniquely close at ANY wavelength (gap-ratio>0.35,
+    # min across λ) — i.e. they look like helix/ribbon neighbours, not true dups.
+    import re as _re
+    def _port(nm):
+        m = _re.search(r'(\d+)', nm)
+        return int(m.group(1)) if m else None
+    flagged_pairs = sorted([p for p in all_pairs_list if p.get('possible_neighbor')],
+                           key=lambda q: -(q.get('p_dup') or 0))
+    if flagged_pairs:
+        ws = wb.create_sheet('Possible cable-neighbors')
+        headers = ['Pair A', 'Pair B', 'Port offset',
+                   'Uniqueness gap-ratio', 'Duplicate likelihood (%)', 'Flag']
+        rows_data = []
+        for p in flagged_pairs:
+            pa, pb = _port(p['a']), _port(p['b'])
+            off = abs(pa - pb) if (pa is not None and pb is not None) else None
+            rows_data.append([
+                p['a'], p['b'], off, p.get('gap_ratio'),
+                p['p_dup'] * 100.0, '⚠ possible cable-neighbor — verify',
+            ])
+        _write_table(ws, headers, rows_data,
+                     col_widths=[18, 18, 11, 20, 22, 34])
 
     # ---------- Top 30 — lowest disagreement ----------
     ws = wb.create_sheet('Top 30 lowest disagreement')

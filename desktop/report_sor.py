@@ -552,6 +552,46 @@ def _analyze_sor(folder):
     physical_violation = length_violation | events_violation
     p_dup = np.where(physical_violation, np.minimum(p_dup_raw, LEN_CAP), p_dup_raw)
 
+    # ---- Uniqueness ('gap-ratio') confirmation gate (production only) ------
+    # A ribbon/helix neighbour is never uniquely close to ONE partner — it sits
+    # in a graded family of same-clock-position fibres. A real duplicate is a
+    # lone standout. gap_ratio = σ(A,B) / σ(A, next-best fibre), taken mutually
+    # (max over both fibres). > GAP_THRESH means "just one of a crowd" → demote.
+    # Confirmation-only: it can lower a verdict, never raise one.
+    # Runs in 'production' regime only (all_dups/tie_panel/short_panel are
+    # handled by the classifier and would mis-fire here) and only with enough
+    # fibres for "next-best" to be meaningful.
+    GAP_THRESH = 0.35
+    GATE_MIN_FILES = 20
+    gate_on = (regime == 'production') and (len(files) >= GATE_MIN_FILES)
+    K = sigma_matrix.shape[0]
+    name_to_k = {files[valid_idx[k]]['name']: k for k in range(K)}
+    if K > 2:
+        _smc = sigma_matrix.copy(); np.fill_diagonal(_smc, np.inf)
+        _arg1 = np.argmin(_smc, axis=1)
+        _min1 = _smc[np.arange(K), _arg1]
+        _smc2 = _smc.copy(); _smc2[np.arange(K), _arg1] = np.inf
+        _min2 = np.min(_smc2, axis=1)
+        def _best_other(k, excl):  # min σ from fibre k to anyone except `excl`
+            return _min2[k] if _arg1[k] == excl else _min1[k]
+    for i, p in enumerate(pairs):
+        gr = None
+        ka = name_to_k.get(p['a']); kb = name_to_k.get(p['b'])
+        if ka is not None and kb is not None and K > 2:
+            ba, bb = _best_other(ka, kb), _best_other(kb, ka)
+            ra = sigma_matrix[ka, kb] / ba if ba > 0 else np.inf
+            rb = sigma_matrix[ka, kb] / bb if bb > 0 else np.inf
+            gr = float(max(ra, rb))
+        p['gap_ratio'] = gr
+        # FLAG ONLY — do NOT change the likelihood. We mark pairs that are being
+        # shown as duplicates (p_dup > 0.5) but that the uniqueness test says are
+        # not uniquely close (gap_ratio > GAP_THRESH) — i.e. they look like a
+        # cable/ribbon neighbor, not a true duplicate. The verdict is left to the
+        # tech; this just surfaces our suspicion so they can verify. Because
+        # p_dup is never touched, flagging can NEVER hide a real duplicate.
+        flagged = (gate_on and p_dup[i] > 0.5 and gr is not None and gr > GAP_THRESH)
+        p['possible_neighbor'] = bool(flagged)
+
     for i, p in enumerate(pairs):
         p['p_dup_sigma']   = float(p_dup_sigma[i])
         p['p_dup_r']       = float(p_dup_r[i])
@@ -861,6 +901,8 @@ def build_xlsx_sor(folder, title, out_xlsx):
         ('Bulk pair-σ (dB)', f'{analysis.get("bulk_sigma", 0.0):.4f}'),
         ('Bulk pair-r',      f'{analysis.get("bulk_r", 0.0):.4f}'),
         ('Frac pairs r≥0.95', f'{analysis.get("frac_high_r", 0.0):.2f}'),
+        ('Possible cable-neighbor flags',
+         sum(1 for p in pairs if p.get('possible_neighbor'))),
         ('Likelihood ≥ 99%', n99),
         ('Likelihood ≥ 50%', n50),
         ('Likelihood ≥ 10%', n10),
@@ -951,6 +993,38 @@ def build_xlsx_sor(folder, title, out_xlsx):
         ])
     _write_table(ws, headers, rows_data,
                  col_widths=[18, 18, 13, 32, 18, 12, 11, 22])
+
+    # ---------- Possible cable-neighbors (uniqueness flag, review-only) ------
+    # Pairs that are being SHOWN as duplicates but that the uniqueness test says
+    # are not UNIQUELY close — they sit in a graded helix family of same-cable-
+    # position fibres. gap-ratio = σ(pair) / σ(to next-best fibre); > 0.35 means
+    # "one of a crowd". This is a FLAG only: the likelihood is left unchanged and
+    # the call is the tech's. Listed here so a tech can verify each one.
+    import re as _re
+    def _port(nm):
+        m = _re.search(r'(\d+)', nm); return int(m.group(1)) if m else None
+    flagged_pairs = sorted([p for p in pairs if p.get('possible_neighbor')],
+                           key=lambda q: -(q.get('p_dup') or 0))
+    if flagged_pairs:
+        ws = wb.create_sheet('Possible cable-neighbors')
+        headers = ['Pair A', 'Pair B', 'Port offset',
+                   'Duplicate likelihood (%)', 'Uniqueness gap-ratio',
+                   'Events matched', 'Flag']
+        rows_data = []
+        for p in flagged_pairs:
+            pa, pb = _port(p['a']), _port(p['b'])
+            off = abs(pa - pb) if (pa is not None and pb is not None) else None
+            nm = p.get('events_n_match'); nx = p.get('events_n_max')
+            ev = f'{nm}/{nx}' if nm is not None else '—'
+            rows_data.append([
+                p['a'], p['b'], off,
+                p['p_dup'] * 100.0,
+                p.get('gap_ratio'),
+                ev,
+                '⚠ possible cable-neighbor — verify',
+            ])
+        _write_table(ws, headers, rows_data,
+                     col_widths=[18, 18, 11, 22, 20, 14, 34])
 
     # ---------- Top 30 — lowest disagreement ----------
     ws = wb.create_sheet('Top 30 lowest disagreement')
