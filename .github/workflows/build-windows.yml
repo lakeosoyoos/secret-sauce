@@ -12,6 +12,9 @@ on:
       - "desktop/**"
       - ".github/workflows/build-windows.yml"
 
+permissions:
+  contents: write          # needed to publish the Release
+
 jobs:
   build:
     runs-on: windows-latest
@@ -52,3 +55,17 @@ jobs:
           name: SecretSauce-Windows
           path: desktop/SecretSauce-Windows.zip
           retention-days: 30
+
+      - name: Publish to a Release (permanent download link)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Create the release once (ignore "already exists"), then replace the
+          # zip in place. The download URL stays the same on every build:
+          #   https://github.com/lakeosoyoos/secret-sauce/releases/download/windows-build/SecretSauce-Windows.zip
+          gh release create windows-build \
+            --title "Secret Sauce — Windows (latest)" \
+            --notes "Latest Windows desktop app. Download the zip, right-click → Properties → Unblock, extract, then double-click SecretSauce.exe. First launch takes 10-30s." \
+            --latest 2>/dev/null || true
+          gh release upload windows-build SecretSauce-Windows.zip --clobber
