@@ -57,12 +57,18 @@ jobs:
         run: |
           $exe = "dist/SecretSauce/SecretSauce.exe"
           if (-not (Test-Path $exe)) { Write-Error "exe not found: $exe"; exit 1 }
-          Write-Host "Launching $exe ..."
-          $proc = Start-Process -FilePath $exe -PassThru
+          # Redirect the app's stdout/stderr to files so we capture the
+          # PyInstaller bootstrap traceback even though it's a windowed (no
+          # console) exe — that's where a missing module like jaraco surfaces.
+          $out = Join-Path $env:RUNNER_TEMP "ss_out.txt"
+          $err = Join-Path $env:RUNNER_TEMP "ss_err.txt"
+          Write-Host "Launching $exe (stdout/stderr captured) ..."
+          $proc = Start-Process -FilePath $exe -PassThru `
+                    -RedirectStandardOutput $out -RedirectStandardError $err
           $ok = $false
-          for ($i = 0; $i -lt 60; $i++) {
+          for ($i = 0; $i -lt 45; $i++) {
             Start-Sleep -Seconds 2
-            if ($proc.HasExited) { Write-Host "process exited early (code $($proc.ExitCode))"; break }
+            if ($proc.HasExited) { Write-Host "process EXITED early, code=$($proc.ExitCode)"; break }
             try {
               $r = Invoke-WebRequest -Uri "http://127.0.0.1:8501/_stcore/health" `
                                      -UseBasicParsing -TimeoutSec 2
@@ -73,10 +79,15 @@ jobs:
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           Get-Process -Name SecretSauce -ErrorAction SilentlyContinue |
             Stop-Process -Force -ErrorAction SilentlyContinue
+          # always dump what we captured (helps whether we pass or fail)
+          Write-Host "===== captured STDERR ====="
+          if (Test-Path $err) { Get-Content $err -Tail 200 } else { Write-Host "(none)" }
+          Write-Host "===== captured STDOUT ====="
+          if (Test-Path $out) { Get-Content $out -Tail 80 } else { Write-Host "(none)" }
+          Write-Host "===== secretsauce.log ====="
+          $log = Join-Path $env:USERPROFILE ".secretsauce/secretsauce.log"
+          if (Test-Path $log) { Get-Content $log -Tail 80 } else { Write-Host "(none)" }
           if (-not $ok) {
-            Write-Host "----- secretsauce.log (if any) -----"
-            $log = Join-Path $env:USERPROFILE ".secretsauce/secretsauce.log"
-            if (Test-Path $log) { Get-Content $log -Tail 100 }
             Write-Error "BOOT SELF-TEST FAILED: packaged app did not serve /_stcore/health. Not publishing."
             exit 1
           }
