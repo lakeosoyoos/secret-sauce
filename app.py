@@ -22,7 +22,8 @@ sys.path.insert(0, HERE)
 
 from report import (run_json_bytes, run_trc_bytes,
                     run_json_xlsx_bytes, run_trc_xlsx_bytes)
-from report_sor import run_sor_bytes, run_sor_xlsx_bytes
+from report_sor import (run_sor_bytes, run_sor_xlsx_bytes,
+                        group_sor_by_direction, bidirectional_sanity_check)
 from sor_reader324802a import direction_key_from_genparams
 
 
@@ -171,7 +172,13 @@ def _copy_to_subdir(paths, subdir):
 reports = []  # (filename, bytes, n_files, n_pairs, label)
 
 if sor_files:
-    groups = _group_sor(sor_files)
+    # Mislabel-safe grouping: if GenParams lumps two filename families into one
+    # direction key (mislabeled directions), split by filename prefix and warn
+    # rather than silently merging two directions into one analysis.
+    groups, dir_warnings = group_sor_by_direction(sor_files)
+    groups = {k: v for k, v in groups.items() if len(v) >= 2}
+    for w in dir_warnings:
+        st.warning("⚠️ " + w)
     if not groups:
         st.error("Could not form any SOR direction group with ≥2 files.")
         st.stop()
@@ -184,6 +191,7 @@ if sor_files:
 
     want_xlsx = output_format.startswith("Excel")
     ext = "xlsx" if want_xlsx else "pdf"
+    dir_summaries = []
     for prefix, paths in groups.items():
         subdir = _copy_to_subdir(paths, os.path.join(tmp_dir, f"sor_{prefix}"))
         title = (f"Secret Sauce — {prefix}" if len(groups) > 1
@@ -193,13 +201,21 @@ if sor_files:
         with st.spinner(f"Running {prefix} ({len(paths)} files)…"):
             try:
                 if want_xlsx:
-                    out_bytes, n_files, n_pairs = run_sor_xlsx_bytes(subdir, title)
+                    out_bytes, n_files, n_pairs, ndup = run_sor_xlsx_bytes(subdir, title)
                 else:
-                    out_bytes, n_files, n_pairs = run_sor_bytes(subdir, title)
+                    out_bytes, n_files, n_pairs, ndup = run_sor_bytes(subdir, title)
             except Exception as e:
                 st.error(f"{prefix}: {e}")
                 continue
         reports.append((fname, out_bytes, n_files, n_pairs, prefix))
+        dir_summaries.append({'key': prefix, 'n50': ndup, 'n_pairs': n_pairs})
+
+    # Bidirectional sanity signal: real duplicates appear in BOTH shot
+    # directions, so a forward-says-many / reverse-says-none split is a likely
+    # shared-structure artifact, not real duplication.
+    susp, msg = bidirectional_sanity_check(dir_summaries)
+    if susp:
+        st.warning("⚠️ " + msg)
 elif trc_files:
     subdir = _copy_to_subdir(trc_files, os.path.join(tmp_dir, "trc_input"))
     want_xlsx = output_format.startswith("Excel")

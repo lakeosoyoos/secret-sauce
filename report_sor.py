@@ -69,6 +69,78 @@ def load_sor_file(path):
     }
 
 
+def group_sor_by_direction(paths):
+    """Group SOR files by shot direction, ROBUST to mislabeled GenParams.
+
+    Primary key is the file-internal direction (GenParams originating ->
+    terminating location codes). But GenParams can be wrong — e.g. both shot
+    directions of a span carrying the SAME A->B codes (as on Duran<->Ancho),
+    which would silently MERGE two directions into one analysis and corrupt the
+    regime stats. Guard: if one GenParams group contains clearly distinct
+    filename-prefix families, split by filename prefix and warn instead of
+    merging. Returns (groups, warnings): groups maps label -> list of paths.
+    """
+    from collections import defaultdict
+    import re
+    try:
+        from sor_reader324802a import direction_key_from_genparams as _dk
+    except Exception:
+        def _dk(_p):
+            return None
+
+    def _famkey(path):
+        b = os.path.basename(path)
+        m = re.match(r'([A-Za-z]+)', b)          # leading alpha prefix, e.g. DURANC
+        return m.group(1).upper() if m else b[:6].upper()
+
+    by_gp = defaultdict(list)
+    for p in paths:
+        by_gp[_dk(p) or _famkey(p)].append(p)
+
+    groups, warnings = {}, []
+    for gp_key, plist in by_gp.items():
+        fams = defaultdict(list)
+        for p in plist:
+            fams[_famkey(p)].append(p)
+        if len(fams) > 1:
+            warnings.append(
+                f"Direction metadata looks mislabeled: GenParams key '{gp_key}' "
+                f"spans {len(fams)} filename families ({', '.join(sorted(fams))}). "
+                f"Splitting by filename prefix instead of merging them.")
+            for fam, fp in fams.items():
+                groups[fam] = fp
+        else:
+            groups[gp_key] = plist
+    return groups, warnings
+
+
+def bidirectional_sanity_check(analyses):
+    """Sanity signal for bidirectional jobs (forward + reverse of one span).
+
+    Real duplicates are direction-INDEPENDENT: a re-shoot is a re-shoot whichever
+    end you analyze from. So if one direction flags a large fraction of pairs as
+    duplicates while the other flags ~none, the high side is almost certainly a
+    regime ARTIFACT (shared panel structure read as duplication), not real — the
+    exact Duran->Ancho signature. Returns (is_suspicious, message).
+
+    Pass the per-direction analysis dicts (the list/dict returned by _analyze_sor).
+    """
+    items = list(analyses.values()) if isinstance(analyses, dict) else list(analyses)
+    if len(items) < 2:
+        return False, ''
+    def _np(a):                       # pair count: explicit 'n_pairs' or len(pairs)
+        return a.get('n_pairs') or len(a.get('pairs', []))
+    rates = [a.get('n50', 0) / max(_np(a), 1) for a in items]
+    hi, lo = max(rates), min(rates)
+    if hi >= 0.05 and lo <= 0.005 and hi >= 20.0 * max(lo, 1e-9):
+        return True, (
+            f"Directional disagreement: one direction flags {hi*100:.1f}% of pairs "
+            f"as duplicates, the other only {lo*100:.2f}%. Real duplicates appear in "
+            f"BOTH directions, so the high side is likely shared-structure artifact "
+            f"— review against the fingerprint (tie-panel) result before trusting it.")
+    return False, ''
+
+
 def _pair_score(a, b, interior_start, interior_end):
     pa, pb = a['pos'], b['pos']
     ta, tb = a['trace'], b['trace']
@@ -401,7 +473,36 @@ def _analyze_sor(folder):
     #   production  — typical case.
     # Order matters: all_dups checked first so a hypothetical all-duplicates
     # short-fiber dataset doesn't get misrouted to short_panel.
-    if bulk_r >= 0.7 and bulk_sigma < 0.10:
+    # ---- Noise-relative discriminator (replaces the brittle absolute σ<0.10) -
+    # all_dups vs tie_panel both show high bulk r; the ONLY physical difference
+    # is σ: re-shoots of the SAME fiber disagree purely at the measurement-noise
+    # floor, while different fibers (sharing route structure) disagree ABOVE it.
+    # A fixed 0.10 dB can't know the floor — it varies ~10x with pulse width,
+    # averaging and fiber length. So estimate the floor from THIS dataset's own
+    # traces (robust 2nd-difference MAD) and decide on the RATIO:
+    #     σ_ratio = bulk_σ / (√2 · noise_floor)   ≈1 → same fiber;  ≫1 → different
+    def _trace_noise(t):
+        t = t.astype(np.float64)
+        if t.size < 8:
+            return np.nan
+        d2 = t[2:] - 2.0 * t[1:-1] + t[:-2]     # 2nd diff: var = 6σ² for white noise
+        mad = np.median(np.abs(d2 - np.median(d2)))
+        return 1.4826 * mad / np.sqrt(6.0)
+    _noises = []
+    for f in files:
+        pa, ta = f['pos'], f['trace']; n = len(ta)
+        m = (pa[:n] > interior_start) & (pa[:n] < interior_end)
+        if m.sum() >= 50:
+            nz = _trace_noise(ta[:n][m])
+            if np.isfinite(nz):
+                _noises.append(nz)
+    noise_floor = float(np.median(_noises)) if _noises else 0.0
+    exp_pair_sigma = np.sqrt(2.0) * noise_floor          # same-fiber pair σ ≈ √2·floor
+    sigma_ratio = (bulk_sigma / exp_pair_sigma) if exp_pair_sigma > 0 else np.inf
+    SIGMA_RATIO_MAX = 3.0    # all_dups only when bulk σ is within ~3× the noise floor
+    # Order matters: all_dups checked first so a hypothetical all-duplicates
+    # short-fiber dataset doesn't get misrouted to short_panel.
+    if bulk_r >= 0.7 and sigma_ratio <= SIGMA_RATIO_MAX:
         regime = 'all_dups'
     elif min_L < 200 and len(files) >= 50:
         regime = 'short_panel'
@@ -409,8 +510,9 @@ def _analyze_sor(folder):
         regime = 'tie_panel'
     else:
         regime = 'production'
-    print(f'Regime: {regime} (bulk σ={bulk_sigma:.4f} dB, '
-          f'bulk r={bulk_r:.4f}, frac high-r={frac_high_r:.2f})')
+    print(f'Regime: {regime} (bulk σ={bulk_sigma:.4f} dB, bulk r={bulk_r:.4f}, '
+          f'frac high-r={frac_high_r:.2f}, noise floor={noise_floor:.4f} dB, '
+          f'σ-ratio={sigma_ratio:.2f})')
     tie_panel_mode = (regime == 'tie_panel')
     if regime == 'tie_panel':
         # Re-compute with fingerprint extraction (median-trace subtraction)
@@ -641,6 +743,8 @@ def _analyze_sor(folder):
         'bulk_sigma': bulk_sigma,
         'bulk_r': bulk_r,
         'frac_high_r': frac_high_r,
+        'noise_floor': noise_floor,
+        'sigma_ratio': sigma_ratio,
     }
 
 
@@ -716,10 +820,17 @@ def build_report_sor(folder, title, out_pdf):
                      f'<td class="center">{p["score"]:.4f}</td>'
                      f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td></tr>')
 
-    # Confirmed-duplicate detail table (p_dup > 0.5)
+    # Confirmed-duplicate detail table (p_dup > 0.5). CAP the rows: an all_dups
+    # / tie_panel run can have 100k+ pairs over 50%, which makes the PDF
+    # unrenderable (Chrome times out on the giant HTML) and unreadable anyway.
+    # Show the strongest N by likelihood here; the FULL set is always in the
+    # Excel report.
+    _DUP_DETAIL_CAP = 500
     file_by_name = {f['name']: f for f in files}
-    dup_pairs_sorted = sorted([p for p in pairs if p['p_dup'] > 0.5],
-                              key=lambda q: -q['p_dup'])
+    _all_dup_pairs = sorted([p for p in pairs if p['p_dup'] > 0.5],
+                            key=lambda q: -q['p_dup'])
+    _dup_total = len(_all_dup_pairs)
+    dup_pairs_sorted = _all_dup_pairs[:_DUP_DETAIL_CAP]
     dup_detail_rows = ''
     for p in dup_pairs_sorted:
         fa = file_by_name.get(p['a']); fb = file_by_name.get(p['b'])
@@ -760,9 +871,12 @@ def build_report_sor(folder, title, out_pdf):
     dup_detail_block = ''
     if dup_detail_rows:
         wl_hdr = f'{int(files[0].get("wavelength") or 0)} nm' if files else ''
+        _cap_note = (f' — showing top {_DUP_DETAIL_CAP:,} of {_dup_total:,} by '
+                     f'likelihood (full list in the Excel report)'
+                     if _dup_total > _DUP_DETAIL_CAP else '')
         dup_detail_block = f'''
 <div class="section-block">
-<div class="dir-banner">3. Confirmed duplicate pairs (≥50% likelihood) — detail ({wl_hdr})</div>
+<div class="dir-banner">3. Confirmed duplicate pairs (≥50% likelihood) — detail ({wl_hdr}){_cap_note}</div>
 <table class="vote-table">
 <tr><th style="text-align:left">Pair</th><th>Time gap</th>
   <th>max splice Δ (mdB)</th><th>span loss Δ (mdB)</th>
@@ -835,20 +949,21 @@ def build_report_sor(folder, title, out_pdf):
     with open(out_pdf, 'wb') as fh:
         fh.write(pdf_bytes)
     print(f'PDF:  {out_pdf}')
-    return out_pdf
+    return analysis
 
 
 def run_sor_bytes(folder, title):
-    """Run SOR mode and return (pdf_bytes, n_files, n_pairs)."""
+    """Run SOR mode and return (pdf_bytes, n_files, n_pairs, n_dup50)."""
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         tmp_pdf = os.path.join(td, 'report.pdf')
-        build_report_sor(folder, title, tmp_pdf)
+        analysis = build_report_sor(folder, title, tmp_pdf)
         with open(tmp_pdf, 'rb') as fh:
             pdf_bytes = fh.read()
-    n_files = len(glob.glob(os.path.join(folder, '*.sor')))
-    n_pairs = n_files * (n_files - 1) // 2
-    return pdf_bytes, n_files, n_pairs
+    n_files = len(analysis['files'])
+    n_pairs = len(analysis['pairs'])
+    n_dup50 = int(analysis.get('n50', 0))
+    return pdf_bytes, n_files, n_pairs, n_dup50
 
 
 def build_xlsx_sor(folder, title, out_xlsx):
@@ -1083,20 +1198,21 @@ def build_xlsx_sor(folder, title, out_xlsx):
 
     wb.save(out_xlsx)
     print(f'XLSX: {out_xlsx}')
-    return out_xlsx
+    return analysis
 
 
 def run_sor_xlsx_bytes(folder, title):
-    """Run SOR mode and return (xlsx_bytes, n_files, n_pairs)."""
+    """Run SOR mode and return (xlsx_bytes, n_files, n_pairs, n_dup50)."""
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         tmp = os.path.join(td, 'report.xlsx')
-        build_xlsx_sor(folder, title, tmp)
+        analysis = build_xlsx_sor(folder, title, tmp)
         with open(tmp, 'rb') as fh:
             xlsx_bytes = fh.read()
-    n_files = len(glob.glob(os.path.join(folder, '*.sor')))
-    n_pairs = n_files * (n_files - 1) // 2
-    return xlsx_bytes, n_files, n_pairs
+    n_files = len(analysis['files'])
+    n_pairs = len(analysis['pairs'])
+    n_dup50 = int(analysis.get('n50', 0))
+    return xlsx_bytes, n_files, n_pairs, n_dup50
 
 
 def main():

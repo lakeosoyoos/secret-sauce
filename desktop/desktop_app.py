@@ -23,8 +23,8 @@ sys.path.insert(0, HERE)
 
 from report import (run_json_xlsx_bytes, run_trc_xlsx_bytes,
                     run_json_bytes, run_trc_bytes)
-from report_sor import run_sor_xlsx_bytes, run_sor_bytes
-from sor_reader324802a import direction_key_from_genparams
+from report_sor import (run_sor_xlsx_bytes, run_sor_bytes,
+                        group_sor_by_direction, bidirectional_sanity_check)
 
 
 st.set_page_config(page_title="Secret Sauce — Desktop", layout="wide")
@@ -188,32 +188,43 @@ if st.button("Run analysis", type="primary"):
 
     try:
         if sor_files:
-            # group by file-internal direction key (forward/reverse split)
-            groups = defaultdict(list)
-            for p in sor_files:
-                key = direction_key_from_genparams(p) or os.path.basename(p)[:8]
-                groups[key].append(p)
+            # Group by shot direction, ROBUST to mislabeled GenParams. If one
+            # GenParams key spans multiple filename families (i.e. two shot
+            # directions carrying the same A->B codes), split by filename prefix
+            # and warn instead of silently merging directions into one analysis.
+            groups, dir_warnings = group_sor_by_direction(sor_files)
             groups = {k: v for k, v in groups.items() if len(v) >= 2}
+            for w in dir_warnings:
+                st.warning("⚠️ " + w)
             if not groups:
                 st.error("Could not form a direction group with ≥2 SOR files.")
                 st.stop()
 
             st.write(f"Detected **{len(groups)} direction group(s)**.")
+            dir_summaries = []
             for key, paths in groups.items():
                 stage = _stage_flat(paths)
                 title = f"Secret Sauce — {key}"
                 with st.spinner(f"Running {key} ({len(paths)} files)…"):
                     if want_xlsx:
-                        data, nf, npairs = run_sor_xlsx_bytes(stage, title)
+                        data, nf, npairs, ndup = run_sor_xlsx_bytes(stage, title)
                     else:
-                        data, nf, npairs = run_sor_bytes(stage, title)
+                        data, nf, npairs, ndup = run_sor_bytes(stage, title)
                 fname = (f"{key}_secret_sauce.{ext}" if len(groups) > 1
                          else f"report.{ext}")
                 outp = os.path.join(out_dir, fname)
                 with open(outp, "wb") as fh:
                     fh.write(data)
                 written.append((outp, nf, npairs, key))
+                dir_summaries.append({'key': key, 'n50': ndup, 'n_pairs': npairs})
                 shutil.rmtree(stage, ignore_errors=True)
+
+            # Bidirectional sanity signal: real duplicates appear in BOTH shot
+            # directions, so a forward-says-many / reverse-says-none split points
+            # to a shared-structure artifact, not real duplication.
+            susp, msg = bidirectional_sanity_check(dir_summaries)
+            if susp:
+                st.warning("⚠️ " + msg)
 
         elif trc_files:
             stage = _stage_flat(trc_files)

@@ -303,6 +303,18 @@ def _interior_mask(pos, length_m=None):
     return (pos > lo) & (pos < hi)
 
 
+def _trace_noise(t):
+    """Robust per-trace measurement-noise estimate via 2nd differences.
+    var(2nd diff) = 6·σ² for white noise; MAD makes it robust to events/slope.
+    Used by the noise-relative regime discriminator (see _classify_regime_*)."""
+    t = np.asarray(t, dtype=np.float64)
+    if t.size < 8:
+        return np.nan
+    d2 = t[2:] - 2.0 * t[1:-1] + t[:-2]
+    mad = np.median(np.abs(d2 - np.median(d2)))
+    return 1.4826 * mad / np.sqrt(6.0)
+
+
 def _shape_r(a, b, wl):
     """Detrended Pearson correlation between two traces at one wavelength.
     Returns r in [-1, 1] or None if insufficient samples. r ≈ 1 → same fiber."""
@@ -1453,10 +1465,15 @@ def _classify_regime_multiwl(files, batch, wl_list):
     """Three-regime classifier (matches the SOR side):
 
         'production' — bulk pair-r low (~0.3). σ-outlier detector works.
-        'tie_panel'  — bulk pair-r high (~0.95) AND bulk pair-σ ≥ 0.10 dB.
-                       Many fibers sharing launch+connector signal.
-        'all_dups'   — bulk pair-r high (~0.95) AND bulk pair-σ < 0.10 dB.
-                       Every file is the same physical fiber.
+        'tie_panel'  — bulk pair-r high (~0.95) AND σ ABOVE the noise floor
+                       (σ_ratio > 3). Different fibers sharing launch signal.
+        'all_dups'   — bulk pair-r high (~0.95) AND σ AT the noise floor
+                       (σ_ratio ≤ 3). Every file is the same physical fiber.
+
+    The all_dups/tie_panel split is noise-RELATIVE (σ_ratio = bulk σ ÷ √2·noise
+    floor), not a fixed 0.10 dB — the floor varies ~10x with pulse width and
+    fiber length, so an absolute cutoff mis-binned panels (Duran→Ancho). See
+    report_sor.py for the calibration.
 
     Uses the canonical wavelength's σ/r matrix (1550 nm preferred, else the
     median wavelength). Replaces the prior interior-event count + 20-file
@@ -1468,12 +1485,12 @@ def _classify_regime_multiwl(files, batch, wl_list):
     else:
         canonical = sorted(wl_list)[len(wl_list) // 2]
     if canonical not in batch:
-        return 'production', 0.0, 0.0
+        return 'production', 0.0, 0.0, 0.0, np.inf
     sm = batch[canonical]['sigma_matrix']
     rm = batch[canonical]['r_matrix']
     n = sm.shape[0]
     if n < 2:
-        return 'production', 0.0, 0.0
+        return 'production', 0.0, 0.0, 0.0, np.inf
     iu = np.triu_indices(n, k=1)
     bulk_sigma = float(np.median(sm[iu])) if len(iu[0]) else 0.0
     bulk_r = float(np.median(rm[iu])) if len(iu[0]) else 0.0
@@ -1497,10 +1514,31 @@ def _classify_regime_multiwl(files, batch, wl_list):
         if L:
             file_lengths.append(float(L))
     min_L = min(file_lengths) if file_lengths else 0.0
+    # Noise-relative discriminator (mirrors report_sor.py): same-fiber re-shoots
+    # disagree only at the measurement-noise floor; different fibers disagree
+    # above it. Estimate the floor from this dataset's own canonical-λ traces.
+    _noises = []
+    for f in files:
+        rec = (f.get('wl') or {}).get(canonical)
+        if not rec:
+            continue
+        ta = np.asarray(rec.get('trace')); pa = np.asarray(rec.get('pos'))
+        n2 = min(len(ta), len(pa))
+        if n2 < 8:
+            continue
+        m = _interior_mask(pa[:n2], length_m=rec.get('length_m'))
+        if m.sum() >= 50:
+            nz = _trace_noise(ta[:n2][m])
+            if np.isfinite(nz):
+                _noises.append(nz)
+    noise_floor = float(np.median(_noises)) if _noises else 0.0
+    exp_pair_sigma = np.sqrt(2.0) * noise_floor          # same-fiber pair σ ≈ √2·floor
+    sigma_ratio = (bulk_sigma / exp_pair_sigma) if exp_pair_sigma > 0 else np.inf
+    SIGMA_RATIO_MAX = 3.0    # all_dups only when bulk σ is within ~3× the noise floor
     # Same four-regime taxonomy as the SOR side — see report_sor.py for
     # full rationale. Order matters: all_dups checked first so a
     # hypothetical all-duplicates short-fiber dataset doesn't get misrouted.
-    if bulk_r >= 0.7 and bulk_sigma < 0.10:
+    if bulk_r >= 0.7 and sigma_ratio <= SIGMA_RATIO_MAX:
         regime = 'all_dups'
     elif min_L > 0 and min_L < 200 and n >= 50:
         regime = 'short_panel'
@@ -1508,7 +1546,7 @@ def _classify_regime_multiwl(files, batch, wl_list):
         regime = 'tie_panel'
     else:
         regime = 'production'
-    return regime, bulk_sigma, bulk_r
+    return regime, bulk_sigma, bulk_r, noise_floor, sigma_ratio
 
 
 def _build_pairs_multiwl(files, wl_list, truth_dups):
@@ -1518,8 +1556,10 @@ def _build_pairs_multiwl(files, wl_list, truth_dups):
     # fingerprint extraction only if the dataset is a tie panel.
     batch_raw = _compute_pair_metrics_batch_multiwl(files, wl_list,
                                                     tie_panel_mode=False)
-    regime, bulk_sigma, bulk_r = _classify_regime_multiwl(files, batch_raw, wl_list)
-    print(f'Regime: {regime} (bulk σ={bulk_sigma:.4f} dB, bulk r={bulk_r:.4f})')
+    regime, bulk_sigma, bulk_r, noise_floor, sigma_ratio = \
+        _classify_regime_multiwl(files, batch_raw, wl_list)
+    print(f'Regime: {regime} (bulk σ={bulk_sigma:.4f} dB, bulk r={bulk_r:.4f}, '
+          f'noise floor={noise_floor:.4f} dB, σ-ratio={sigma_ratio:.2f})')
     if regime == 'tie_panel':
         batch = _compute_pair_metrics_batch_multiwl(files, wl_list,
                                                     tie_panel_mode=True)
