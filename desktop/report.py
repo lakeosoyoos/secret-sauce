@@ -423,10 +423,38 @@ def _shape_color(r):
 
 
 def _find_chrome():
-    for p in ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-              '/usr/bin/google-chrome', '/usr/bin/chromium-browser']:
+    """Locate a Chromium-based browser for headless PDF rendering, across
+    macOS / Linux / Windows. On Windows, Microsoft Edge is always installed,
+    so PDF works on any tech's machine even without Chrome."""
+    candidates = [
+        # macOS
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+        '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        # Linux
+        '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable',
+        '/usr/bin/chromium-browser', '/usr/bin/chromium',
+        '/usr/bin/microsoft-edge',
+    ]
+    # Windows — Chrome then Edge (Edge ships with every Windows install)
+    for env in ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA'):
+        root = os.environ.get(env)
+        if not root:
+            continue
+        candidates += [
+            os.path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            os.path.join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        ]
+    for p in candidates:
         if os.path.isfile(p):
             return p
+    # last resort: anything named chrome/edge on PATH
+    import shutil as _sh
+    for name in ('google-chrome', 'chrome', 'chromium', 'msedge',
+                 'microsoft-edge'):
+        found = _sh.which(name)
+        if found:
+            return found
     return None
 
 

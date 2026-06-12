@@ -64,23 +64,25 @@ def _pick_folder():
 if "folder" not in st.session_state:
     st.session_state["folder"] = ""
 
-c1, c2 = st.columns([1, 3])
+st.subheader("Step 1 — choose your folder of fiber files")
+c1, c2 = st.columns([1, 2])
 with c1:
-    if st.button("📁 Browse…", use_container_width=True):
+    if st.button("📁  Browse for folder", type="primary",
+                 use_container_width=True):
         picked = _pick_folder()
         if picked:
             st.session_state["folder"] = picked
 with c2:
     st.session_state["folder"] = st.text_input(
-        "Folder path",
+        "…or paste a folder path here",
         value=st.session_state["folder"],
         placeholder=r"C:\Users\you\Desktop\fiber files",
     )
 
 folder = st.session_state["folder"].strip().strip('"')
 if not folder or not os.path.isdir(folder):
-    st.info("Choose a folder containing your .sor, .trc, or .json files "
-            "(the Browse button opens a normal folder picker).")
+    st.info("👆 Click **Browse for folder** and pick the folder that holds your "
+            ".sor / .trc / .json files. (A normal folder picker opens.)")
     st.stop()
 
 
