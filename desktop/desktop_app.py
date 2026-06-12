@@ -35,9 +35,17 @@ st.caption(
     "this machine, and there is no file-size limit."
 )
 
-# ----- Quit button (the packaged app has no console window to close) -----
+# ----- Quit button + version indicator -----------------------------------
 with st.sidebar:
     st.markdown("### Secret Sauce")
+    # Show whether we're on the auto-updated (online) or bundled (offline) code,
+    # so it's clear the app pulls the latest version on launch.
+    _src = os.environ.get("SS_ENGINE_SOURCE", "")
+    if _src:
+        if _src.startswith("latest"):
+            st.caption("✅ Version: " + _src)
+        else:
+            st.caption("⚠️ Version: " + _src)
     st.caption("When you're finished, click Quit to close the app.")
     if st.button("⏻ Quit Secret Sauce", use_container_width=True):
         st.success("Secret Sauce is shutting down — you can close this browser tab.")

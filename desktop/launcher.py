@@ -8,8 +8,55 @@ browser, so the tech just double-clicks SecretSauce.exe.
 import os
 import sys
 import time
+import shutil
+import tempfile
 import threading
 import webbrowser
+
+# ----- auto-update: pull the latest engine + UI from the repo on launch -----
+# The heavy shell (Streamlit/numpy/scipy — the ~150 MB) is frozen in the .exe
+# and rarely changes. The engine and UI (these small .py files) change all the
+# time. Fetching them fresh on each launch means a code update goes live on
+# every tech's machine on their NEXT launch, with no re-download of the app.
+# If the machine is offline, we silently fall back to the bundled copies.
+_REPO_RAW = "https://raw.githubusercontent.com/lakeosoyoos/secret-sauce/main"
+_LIVE_FILES = {
+    # local cache name      : path in the repo
+    "report.py":            "report.py",
+    "report_sor.py":        "report_sor.py",
+    "sor_reader324802a.py": "sor_reader324802a.py",
+    "trc_parser.py":        "trc_parser.py",
+    "desktop_app.py":       "desktop/desktop_app.py",
+}
+
+
+def _fetch_latest_code():
+    """Download the live engine+UI into a cache dir. All-or-nothing: only swap
+    in the cache if EVERY file downloaded and looks like real Python, otherwise
+    return None so we use the bundled copies. Returns the cache dir or None."""
+    import urllib.request
+    staging = tempfile.mkdtemp(prefix="ss_fetch_")
+    try:
+        for local_name, repo_path in _LIVE_FILES.items():
+            with urllib.request.urlopen(f"{_REPO_RAW}/{repo_path}",
+                                        timeout=8) as resp:
+                data = resp.read()
+            # sanity: non-empty and looks like our python (guards against an
+            # error page / truncated download being treated as code)
+            if not data or b"def " not in data:
+                raise ValueError(f"unexpected content for {repo_path}")
+            with open(os.path.join(staging, local_name), "wb") as fh:
+                fh.write(data)
+        cache = os.path.join(os.path.expanduser("~"), ".secretsauce", "engine")
+        os.makedirs(cache, exist_ok=True)
+        for local_name in _LIVE_FILES:
+            shutil.copy(os.path.join(staging, local_name),
+                        os.path.join(cache, local_name))
+        return cache
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _redirect_output_to_log():
@@ -81,7 +128,21 @@ def _open_browser():
 def main():
     _redirect_output_to_log()
     _silence_first_run_prompt()
-    script = os.path.join(_base_dir(), "desktop_app.py")
+
+    # Pull the latest code; use it if the fetch fully succeeded, else the
+    # bundled copies. The cached desktop_app.py does sys.path.insert(0, HERE),
+    # so its imports resolve to the freshly-fetched engine in the same dir.
+    cache = _fetch_latest_code()
+    if cache and os.path.exists(os.path.join(cache, "desktop_app.py")):
+        script = os.path.join(cache, "desktop_app.py")
+        os.environ["PYTHONPATH"] = cache + os.pathsep + os.environ.get("PYTHONPATH", "")
+        os.environ["SS_ENGINE_SOURCE"] = "latest (auto-updated from the cloud)"
+        print(f"[launcher] using auto-updated code from {cache}")
+    else:
+        script = os.path.join(_base_dir(), "desktop_app.py")
+        os.environ["SS_ENGINE_SOURCE"] = "bundled (offline — using the built-in version)"
+        print("[launcher] offline or fetch failed; using bundled code")
+
     threading.Thread(target=_open_browser, daemon=True).start()
 
     # Boot Streamlit via its CLI entry point (most version-stable across builds)
