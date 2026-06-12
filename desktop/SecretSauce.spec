@@ -68,7 +68,9 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,          # keep a console window so errors are visible
+    console=False,         # no black console window — silent double-click app.
+                           # launcher.py redirects output to a log file, and the
+                           # app has a Quit button (there's no console to close).
     disable_windowed_traceback=False,
     icon=None,             # drop a SecretSauce.ico here and set its path to brand it
 )

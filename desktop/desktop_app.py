@@ -35,6 +35,15 @@ st.caption(
     "this machine, and there is no file-size limit."
 )
 
+# ----- Quit button (the packaged app has no console window to close) -----
+with st.sidebar:
+    st.markdown("### Secret Sauce")
+    st.caption("When you're finished, click Quit to close the app.")
+    if st.button("⏻ Quit Secret Sauce", use_container_width=True):
+        st.success("Secret Sauce is shutting down — you can close this browser tab.")
+        import os as _os
+        _os._exit(0)   # hard-stop the local server process
+
 
 # ----- native folder picker (works because we run locally) --------------
 def _pick_folder():

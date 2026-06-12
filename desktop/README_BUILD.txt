@@ -65,12 +65,17 @@ HOW A TECH USES IT
 ------------------
   1. Extract the zip anywhere (Desktop is fine).
   2. Double-click  SecretSauce.exe  inside the extracted folder.
-     - A console window opens (leave it open — that's the app running).
-     - A browser tab opens to the app.
+     - No window appears at first (it runs quietly in the background).
+     - After a few seconds a browser tab opens to the app.
   3. Click "Browse…", pick the folder of fiber files, choose Excel, Run.
   4. The report appears in a  SecretSauce_reports  subfolder next to the files,
      and can also be downloaded from the page.
-  5. To quit: close the browser tab AND the console window.
+  5. To quit: click the "Quit Secret Sauce" button in the left sidebar (it
+     stops the background app), then close the browser tab.
+     (If they forget, the background app just keeps running harmlessly on
+     localhost until the next reboot, or it can be ended in Task Manager.)
+  Logs, if ever needed for troubleshooting, are written to:
+     C:\Users\<name>\.secretsauce\secretsauce.log
 
 
 NOTES / GOTCHAS

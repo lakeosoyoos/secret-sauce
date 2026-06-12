@@ -12,6 +12,30 @@ import threading
 import webbrowser
 
 
+def _redirect_output_to_log():
+    """A windowed (no-console) build has no stdout/stderr — on Windows they can
+    be None, and anything that writes to them (Streamlit's banner, logging,
+    print) then crashes the app. Point both at a log file in the user's home so
+    nothing writes to a missing console, and so field issues are debuggable."""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        log_dir = os.path.join(os.path.expanduser("~"), ".secretsauce")
+        os.makedirs(log_dir, exist_ok=True)
+        logf = open(os.path.join(log_dir, "secretsauce.log"), "a",
+                    buffering=1, encoding="utf-8", errors="replace")
+        sys.stdout = logf
+        sys.stderr = logf
+    except Exception:
+        # last resort: swallow output so a None-stdout write can't crash us
+        try:
+            devnull = open(os.devnull, "w")
+            sys.stdout = devnull
+            sys.stderr = devnull
+        except Exception:
+            pass
+
+
 def _silence_first_run_prompt():
     """Streamlit asks for an email on first run and BLOCKS on stdin — fatal for
     a double-click app with no console input. Pre-seed an empty credentials
@@ -42,6 +66,7 @@ def _open_browser():
 
 
 def main():
+    _redirect_output_to_log()
     _silence_first_run_prompt()
     script = os.path.join(_base_dir(), "desktop_app.py")
     threading.Thread(target=_open_browser, daemon=True).start()
