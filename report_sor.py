@@ -24,7 +24,7 @@ from report import (  # reuse helpers — all neutral
     html_to_pdf_bytes, _fmt_time_gap, _detrend, _shape_color,
     _COLOR_HIGH, _COLOR_MID, _COLOR_LOW,
     _event_match_quality, _events_agree,
-    _write_acq_sheet, _acq_html,
+    _write_acq_sheet, _acq_html, _pair_confidence,
 )
 
 
@@ -810,13 +810,15 @@ def build_report_sor(folder, title, out_pdf):
         r_val = bp.get('shape_r')
         r_cell = ('<td class="center na">—</td>' if r_val is None else
                   f'<td class="center" style="color:{_shape_color(r_val)};font-weight:600">{r_val:.4f}</td>')
+        _clv, _crs = _pair_confidence(bp, analysis.get('regime', 'production'))
         file_rows += (f'<tr><td class="pair-cell">{f["name"]}</td>'
                       f'<td class="center">{f["length"]/1000:.3f}</td>'
                       f'<td class="center">{loss_cell}</td>'
                       f'<td class="center">{bp["score"]:.4f}</td>'
                       f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td>'
                       f'{r_cell}'
-                      f'<td class="center">{verdict_cell}</td></tr>')
+                      f'<td class="center">{verdict_cell}</td>'
+                      f'<td class="center">{_clv}<br><span style="font-size:0.78em;color:#888">{_crs}</span></td></tr>')
 
     top_rows = ''
     for rank, k in enumerate(order[:30], 1):
@@ -890,10 +892,12 @@ def build_report_sor(folder, title, out_pdf):
         r_val = p.get('shape_r')
         r_cell = ('<td class="center na">—</td>' if r_val is None else
                   f'<td class="center" style="color:{_shape_color(r_val)};font-weight:600">{r_val:.4f}</td>')
+        _clv, _crs = _pair_confidence(p, analysis.get('regime', 'production'))
         dup_detail_rows += (f'<tr><td class="pair-cell">{p["a"]} ↔ {p["b"]}</td>'
                             f'<td class="center">{gap_str}</td>'
                             f'{ms_cell}{sl_cell}{r_cell}{sn_cell}'
-                            f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td></tr>')
+                            f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td>'
+                            f'<td class="center">{_clv}<br><span style="font-size:0.78em;color:#888">{_crs}</span></td></tr>')
     dup_detail_block = ''
     if dup_detail_rows:
         wl_hdr = f'{int(files[0].get("wavelength") or 0)} nm' if files else ''
@@ -906,7 +910,8 @@ def build_report_sor(folder, title, out_pdf):
 <table class="vote-table">
 <tr><th style="text-align:left">Pair</th><th>Time gap</th>
   <th>max splice Δ (mdB)</th><th>span loss Δ (mdB)</th>
-  <th>similarity</th><th>Same OTDR</th><th>Duplicate likelihood</th></tr>
+  <th>similarity</th><th>Same OTDR</th><th>Duplicate likelihood</th>
+  <th>Confidence</th></tr>
 {dup_detail_rows}
 </table>
 </div>
@@ -952,7 +957,7 @@ def build_report_sor(folder, title, out_pdf):
 <tr><th style="text-align:left">File</th>
     <th>Length (km)</th><th>Span loss (dB)</th>
     <th>lowest disagreement</th><th>Duplicate likelihood</th>
-    <th>similarity</th><th>Verdict</th></tr>
+    <th>similarity</th><th>Verdict</th><th>Confidence</th></tr>
 {file_rows}
 </table>
 </div>
@@ -1085,16 +1090,17 @@ def build_xlsx_sor(folder, title, out_xlsx):
     ws = wb.create_sheet('Per-file verdict')
     headers = ['File', 'Length (km)', 'Span loss (dB)',
                'Lowest disagreement', 'Duplicate likelihood (%)',
-               'Similarity', 'Best partner', 'Verdict']
+               'Similarity', 'Best partner', 'Verdict', 'Confidence']
     rows_data = []
     for f in sorted(files, key=lambda x: x['name']):
         bp = best_partner.get(f['name'])
         if bp is None:
-            rows_data.append([f['name'], None, None, None, None, None, None, '—'])
+            rows_data.append([f['name'], None, None, None, None, None, None, '—', '—'])
             continue
         partner = bp['b'] if bp['a'] == f['name'] else bp['a']
         verdict = (f'DUPLICATE of {partner}' if bp['p_dup'] > 0.5
                    else f'unique (closest: {partner})')
+        _clv, _crs = _pair_confidence(bp, analysis.get('regime', 'production'))
         rows_data.append([
             f['name'],
             (f['length'] / 1000.0) if f.get('length') else None,
@@ -1104,16 +1110,18 @@ def build_xlsx_sor(folder, title, out_xlsx):
             bp.get('shape_r'),
             partner,
             verdict,
+            f'{_clv} — {_crs}',
         ])
     _write_table(ws, headers, rows_data,
-                 col_widths=[18, 12, 14, 18, 22, 12, 20, 32])
+                 col_widths=[18, 12, 14, 18, 22, 12, 20, 32, 34])
 
     # ---------- Confirmed duplicates (≥50% likelihood) ----------
     ws = wb.create_sheet('Confirmed duplicates')
     headers = ['Pair A', 'Pair B', 'Time gap (s)',
                'Max splice Δ at matched events (mdB)',
                'Span loss Δ (mdB)', 'Similarity', 'Same OTDR',
-               'Duplicate likelihood (%)']
+               'Duplicate likelihood (%)', 'Confidence']
+    _reg = analysis.get('regime', 'production')
     file_by_name = {f['name']: f for f in files}
     dup_sorted = sorted([p for p in pairs if p['p_dup'] > 0.5],
                         key=lambda q: -q['p_dup'])
@@ -1135,12 +1143,14 @@ def build_xlsx_sor(folder, title, out_xlsx):
             same_sn = 'Yes' if sn_a == sn_b else 'No'
         else:
             same_sn = '—'
+        _clv, _crs = _pair_confidence(p, _reg)
         rows_data.append([
             p['a'], p['b'], gap, ms_d, sl_d,
             p.get('shape_r'), same_sn, p['p_dup'] * 100.0,
+            f'{_clv} — {_crs}',
         ])
     _write_table(ws, headers, rows_data,
-                 col_widths=[18, 18, 13, 32, 18, 12, 11, 22])
+                 col_widths=[18, 18, 13, 32, 18, 12, 11, 22, 34])
 
     # ---------- Possible cable-neighbors (uniqueness flag, review-only) ------
     # Pairs that are being SHOWN as duplicates but that the uniqueness test says

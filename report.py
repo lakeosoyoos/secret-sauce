@@ -936,9 +936,11 @@ def build_report(files, all_pairs_list, truth_dups, out_path,
     best_partner = fin['best_partner']
     p_dup_arr    = fin['p_dup_arr']
 
+    # Only consider the wavelengths this pair actually has (a file can be
+    # missing a WL_ORDER wavelength — indexing it directly used to KeyError).
     dup_pairs = [p for p in all_pairs_list
-                 if all((p['score'][wl] is not None and p['score'][wl] < _SCORE_GATE)
-                        for wl in WL_ORDER)]
+                 if p['score'] and all((s is not None and s < _SCORE_GATE)
+                                       for s in p['score'].values())]
     used = set()
     confirmed = []
     for p in sorted(dup_pairs, key=lambda q: q['sum_score']):
@@ -970,7 +972,7 @@ def build_report(files, all_pairs_list, truth_dups, out_path,
         pair = pair_lookup[tuple(sorted([f['name'], partner]))]
         wl_cells = ''
         for wl in WL_ORDER:
-            sc = pair['score'][wl]
+            sc = pair['score'].get(wl)
             if sc is None:
                 wl_cells += '<td class="center na">---</td>'
             else:
@@ -983,13 +985,15 @@ def build_report(files, all_pairs_list, truth_dups, out_path,
             r_cell = '<td class="center na">—</td>'
         else:
             r_cell = f'<td class="center" style="color:{_shape_color(r_min)};font-weight:600">{r_min:.4f}</td>'
+        _clv, _crs = _pair_confidence(bp['pair'], regime)
         file_rows += (f'<tr><td class="pair-cell">{f["name"]}</td>'
                       f'<td class="center">{f["test_dt"][:19]}</td>'
                       f'{wl_cells}'
                       f'<td class="center">{bp["sum_score"]:.3f}</td>'
                       f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td>'
                       f'{r_cell}'
-                      f'{verdict_html}</tr>')
+                      f'{verdict_html}'
+                      f'<td class="center">{_clv}<br><span style="font-size:0.78em;color:#888">{_crs}</span></td></tr>')
 
     # ---- Confirmed-duplicate detail table (pairs with P(dup) > 0.5) -----
     file_by_name = {f['name']: f for f in files}
@@ -1033,10 +1037,12 @@ def build_report(files, all_pairs_list, truth_dups, out_path,
                              f'font-weight:600">{r_wl:.4f}</td>')
         pd_val = p['p_dup']
         pd_color = '#2d8f48' if pd_val > 0.9 else '#b97000'
+        _clv, _crs = _pair_confidence(p, regime)
         dup_detail_rows += (f'<tr><td class="pair-cell">{p["a"]} ↔ {p["b"]}</td>'
                             f'<td class="center">{gap_str}</td>'
                             f'{ms_cells}{sl_cells}{sr_cells}'
-                            f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td></tr>')
+                            f'<td class="center" style="color:{pd_color};font-weight:600">{pd_val*100:.2f}%</td>'
+                            f'<td class="center">{_clv}<br><span style="font-size:0.78em;color:#888">{_crs}</span></td></tr>')
     dup_detail_block = ''
     if dup_detail_rows:
         ms_hdrs = ''.join(f'<th>max splice Δ @ {wl} (mdB)</th>' for wl in WL_ORDER)
@@ -1047,7 +1053,7 @@ def build_report(files, all_pairs_list, truth_dups, out_path,
 <div class="dir-banner">4. Confirmed duplicate pairs (≥50% likelihood) — detail</div>
 <table class="vote-table">
 <tr><th style="text-align:left">Pair</th><th>Time gap</th>
-  {ms_hdrs}{sl_hdrs}{sr_hdrs}<th>Duplicate likelihood</th></tr>
+  {ms_hdrs}{sl_hdrs}{sr_hdrs}<th>Duplicate likelihood</th><th>Confidence</th></tr>
 {dup_detail_rows}
 </table>
 </div>
@@ -1060,7 +1066,7 @@ def build_report(files, all_pairs_list, truth_dups, out_path,
     for p in nonconf_sorted[:10]:
         wl_cells = ''
         for wl in WL_ORDER:
-            sc = p['score'][wl]
+            sc = p['score'].get(wl)
             if sc is not None:
                 color = '#2d8f48' if sc < _SCORE_GATE else '#c0392b'
                 wl_cells += f'<td class="center" style="color:{color};font-weight:600">{sc:.4f}</td>'
@@ -1147,7 +1153,7 @@ def build_report(files, all_pairs_list, truth_dups, out_path,
 <tr><th style="text-align:left">File</th><th>Acquisition time</th>
   <th>disagreement @ 1310</th><th>disagreement @ 1550</th><th>disagreement @ 1625</th>
   <th>combined disagreement</th><th>Duplicate likelihood</th>
-  <th>similarity (min λ)</th><th>Verdict</th></tr>
+  <th>similarity (min λ)</th><th>Verdict</th><th>Confidence</th></tr>
 {file_rows}
 </table>
 </div>
@@ -1433,6 +1439,48 @@ def _acq_html(records):
         + ''.join(rows) + '</table></div>')
 
 
+# ===================== Per-verdict confidence =====================
+# How much to trust a pair's duplicate likelihood. Starts from how DECISIVE the
+# likelihood is (margin from the 50% line), then DOWNGRADES for known reliability
+# gaps: single-detector regimes (tie_panel/all_dups/short_panel bypass the
+# σ-outlier test, so the verdict rests on one signal), a cable-neighbor flag, or
+# σ-vs-shape disagreement in production. Confirmation-only signal — it never
+# changes the likelihood, just annotates how solid it is.
+_CONF_ORDER = {'Low': 0, 'Medium': 1, 'High': 2}
+_CONF_INV = {0: 'Low', 1: 'Medium', 2: 'High'}
+
+
+def _pair_confidence(p, regime='production'):
+    """Return (level, reason) — 'High'/'Medium'/'Low' confidence in p['p_dup']."""
+    pd = float(p.get('p_dup', 0.0))
+    margin = abs(pd - 0.5)
+    if margin >= 0.40:        # p_dup ≥ 0.90 or ≤ 0.10
+        level, base = 'High', 'decisive'
+    elif margin >= 0.25:      # 0.75–0.90 or 0.10–0.25
+        level, base = 'Medium', 'clear'
+    else:                     # 0.25–0.75 — sits near the decision line
+        level, base = 'Low', 'near the 50% line'
+
+    def _down(lv):
+        return _CONF_INV[max(0, _CONF_ORDER[lv] - 1)]
+
+    reasons = []
+    if regime in ('tie_panel', 'all_dups', 'short_panel') and level == 'High':
+        level = _down(level)
+        reasons.append(f'single-detector regime ({regime})')
+    if p.get('possible_neighbor') and pd > 0.5:
+        level = _down(level)
+        reasons.append('possible cable-neighbor')
+    psig, pr = p.get('p_dup_sigma'), p.get('p_dup_r')
+    if (regime == 'production' and psig is not None and pr is not None
+            and pd > 0.5 and (psig > 0.5) != (pr > 0.5)):
+        level = _down(level)
+        reasons.append('σ and shape disagree')
+    if not reasons:
+        reasons.append(base)
+    return level, '; '.join(reasons)
+
+
 def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
                        title='Duplicate Classification Report',
                        wl_list=None, regime='production'):
@@ -1529,7 +1577,7 @@ def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
     headers = (['File', 'Acquisition time', 'Length (km)']
                + span_loss_hdrs
                + ['Combined disagreement', 'Duplicate likelihood (%)',
-                  'Similarity (min λ)', 'Best partner', 'Verdict'])
+                  'Similarity (min λ)', 'Best partner', 'Verdict', 'Confidence'])
     rows_data = []
     for f in sorted(files, key=lambda x: x['name']):
         bp = best_partner.get(f['name'])
@@ -1544,12 +1592,13 @@ def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
         if bp is None:
             rows_data.append([f['name'], f.get('test_dt', '')[:19], length_km]
                              + span_loss_cells
-                             + [None, None, None, None, '—'])
+                             + [None, None, None, None, '—', '—'])
             continue
         partner = bp['partner']
         pair    = bp['pair']
         verdict = (f'DUPLICATE of {partner}' if pair['p_dup'] > 0.5
                    else f'unique (closest: {partner})')
+        _clv, _crs = _pair_confidence(pair, regime)
         rows_data.append([
             f['name'],
             f.get('test_dt', '')[:19],
@@ -1560,8 +1609,9 @@ def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
             pair.get('r_min'),
             partner,
             verdict,
+            f'{_clv} — {_crs}',
         ])
-    cw = [18, 20, 12] + [16] * len(wl_list) + [22, 22, 18, 20, 32]
+    cw = [18, 20, 12] + [16] * len(wl_list) + [22, 22, 18, 20, 32, 34]
     _write_table(ws, headers, rows_data, col_widths=cw)
 
     # ---------- Confirmed duplicates (≥50% likelihood) ----------
@@ -1571,7 +1621,7 @@ def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
     sr_hdrs = [f'Similarity @ {wl}'         for wl in wl_list]
     headers = (['Pair A', 'Pair B', 'Time gap (s)']
                + ms_hdrs + sl_hdrs + sr_hdrs
-               + ['Duplicate likelihood (%)'])
+               + ['Duplicate likelihood (%)', 'Confidence'])
     file_by_name = {f['name']: f for f in files}
     dup_sorted = sorted([p for p in all_pairs_list if p['p_dup'] > 0.5],
                         key=lambda q: -q['p_dup'])
@@ -1595,13 +1645,14 @@ def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
             sl_cells.append(abs(a_sl - b_sl) * 1000.0
                             if (a_sl is not None and b_sl is not None) else None)
             sr_cells.append((p.get('shape_r') or {}).get(wl))
+        _clv, _crs = _pair_confidence(p, regime)
         rows_data.append(
             [p['a'], p['b'], gap]
             + ms_cells + sl_cells + sr_cells
-            + [p['p_dup'] * 100.0]
+            + [p['p_dup'] * 100.0, f'{_clv} — {_crs}']
         )
     cw = ([18, 18, 13] + [22] * len(wl_list)
-          + [22] * len(wl_list) + [16] * len(wl_list) + [22])
+          + [22] * len(wl_list) + [16] * len(wl_list) + [22, 34])
     _write_table(ws, headers, rows_data, col_widths=cw)
 
     # ---------- Possible cable-neighbors (uniqueness flag, review-only) ------
