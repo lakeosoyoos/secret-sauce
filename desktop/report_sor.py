@@ -24,7 +24,18 @@ from report import (  # reuse helpers — all neutral
     html_to_pdf_bytes, _fmt_time_gap, _detrend, _shape_color,
     _COLOR_HIGH, _COLOR_MID, _COLOR_LOW,
     _event_match_quality, _events_agree,
+    _write_acq_sheet, _acq_html,
 )
+
+
+def _acq_records_sor(files):
+    """One acquisition record per SOR file (each file is a single trace)."""
+    return [{'file': f['name'], 'wavelength_nm': f.get('wavelength'),
+             'otdr_model': f.get('otdr_model'),
+             'otdr_serial': f.get('serial_number'),
+             'timestamp': f.get('timestamp'),
+             'pulse_width_ns': f.get('pulse_width_ns'),
+             'averaging': f.get('averaging')} for f in files]
 
 _IOR = 1.4682
 _LAUNCH_SKIP_M = 500
@@ -51,9 +62,21 @@ def load_sor_file(path):
     max_splice = max((abs(v) for v in splice_vals), default=None) if splice_vals else None
     # Pull OTDR serial number from GenParams/SupParams so we can flag pairs
     # acquired by different OTDRs in the confirmed-duplicate detail table.
-    from sor_reader324802a import parse_gen_params
+    from sor_reader324802a import parse_gen_params, parse_sup_params
     gp = parse_gen_params(path) or {}
     serial = (gp.get('serial_number') or '').strip() or None
+    try:
+        sup = parse_sup_params(path) or {}
+    except Exception:
+        sup = {}
+    model = ((sup.get('otdr_module_id') or sup.get('otdr_mainframe_id') or '')
+             .strip() or None)
+    # Acquisition settings from the EXFO calibration (FxdParams) block.
+    cal = r.get('exfo_calibration') or {}
+    _pw = cal.get('NominalPulseWidth') or cal.get('CalibratedPulseWidth')
+    pulse_width_ns = float(_pw) * 1e9 if _pw else None
+    _navg = cal.get('NumberOfAverages')
+    averaging = f'{int(_navg)} avg' if _navg else None
     return {
         'name':     os.path.splitext(os.path.basename(path))[0],
         'filepath': path,
@@ -65,6 +88,9 @@ def load_sor_file(path):
         'timestamp': r.get('date_time'),
         'wavelength': r.get('exfo_wavelength_nm') or r.get('wavelength'),
         'serial_number': serial,
+        'otdr_model': model,
+        'pulse_width_ns': pulse_width_ns,
+        'averaging': averaging,
         'events':   events,
     }
 
@@ -887,6 +913,11 @@ def build_report_sor(folder, title, out_pdf):
 '''
 
     generated = datetime.now().strftime('%Y-%m-%d %H:%M')
+    try:
+        acq_block = _acq_html(_acq_records_sor(files))
+    except Exception:
+        acq_block = ''
+
     html = f'''<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>{title}</title>
@@ -925,6 +956,8 @@ def build_report_sor(folder, title, out_pdf):
 </div>
 
 {dup_detail_block}
+
+{acq_block}
 
 <div class="section-block">
 <div class="dir-banner">4. Top 30 pairs — lowest level of disagreement</div>
@@ -1195,6 +1228,11 @@ def build_xlsx_sor(folder, title, out_xlsx):
     except Exception as exc:
         # Charts are nice-to-have — never fail the whole report on a render error.
         print(f'  warn: skipped Charts sheet ({exc})')
+
+    try:
+        _write_acq_sheet(wb, _acq_records_sor(files))
+    except Exception as exc:
+        print(f'  warn: skipped Acquisition parameters sheet ({exc})')
 
     wb.save(out_xlsx)
     print(f'XLSX: {out_xlsx}')

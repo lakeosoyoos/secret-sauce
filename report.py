@@ -59,6 +59,19 @@ def _parse_iso_ts(s):
         return s, None
 
 
+def _iso_dur_to_s(s):
+    """ISO-8601 duration like 'PT15S' or 'PT1M30S' -> seconds (float), else None."""
+    import re
+    if not s or not isinstance(s, str):
+        return None
+    m = re.match(r'^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?$', s.strip())
+    if not m:
+        return None
+    d, h, mn, sec = m.groups()
+    total = int(d or 0) * 86400 + int(h or 0) * 3600 + int(mn or 0) * 60 + float(sec or 0)
+    return total if total > 0 else None
+
+
 def load_file(path):
     with open(path) as f:
         d = json.load(f)
@@ -106,16 +119,29 @@ def load_file(path):
                 'splice_loss': splice,
                 'is_end': is_end,
             })
+        params = meas.get('Parameters') or {}
+        try:
+            pulse_ns = (float(params.get('Pulse'))
+                        if params.get('Pulse') not in (None, '') else None)
+        except (TypeError, ValueError):
+            pulse_ns = None
+        _dur_s = _iso_dur_to_s(params.get('Duration'))
         per_wl[wl] = {
             'trace': trace, 'pos': pos,
             'max_splice_dB': _num('MaximumSpliceLoss'),
             'span_loss_dB':  _num('AveragedLoss'),
             'length_m':      _num('Length'),
+            'pulse_width_ns': pulse_ns,
+            'averaging':      (f'{_dur_s:.0f} s' if _dur_s else None),
             'events':        events,
         }
     dt_raw, dt_epoch = _parse_iso_ts(d.get('TestDateTime', ''))
+    hw = (d.get('Hardware') or {}).get('UnitA') or {}
+    otdr_model = str(hw.get('ModelName') or '').strip() or None
+    otdr_serial = str(hw.get('SerialNumber') or '').strip() or None
     return {'name': name, 'filepath': path,
-            'test_dt': dt_raw, 'test_epoch': dt_epoch, 'wl': per_wl}
+            'test_dt': dt_raw, 'test_epoch': dt_epoch,
+            'otdr_model': otdr_model, 'otdr_serial': otdr_serial, 'wl': per_wl}
 
 
 def load_trc_file(path):
@@ -159,11 +185,15 @@ def load_trc_file(path):
                 'splice_loss': e.get('loss_db'),
                 'is_end': is_end,
             })
+        _pw = wlblock.get('pulse_width_s')
+        _navg = wlblock.get('n_averages')
         per_wl[wl_nm] = {
             'trace': trace, 'pos': pos,
             'max_splice_dB': max_splice,
             'span_loss_dB': wlblock.get('span_loss_db'),
             'length_m':     wlblock.get('length_m'),
+            'pulse_width_ns': float(_pw) * 1e9 if _pw else None,
+            'averaging':      f'{int(_navg)} avg' if _navg else None,
             'events':       events,
         }
     ts = r.get('timestamp')
@@ -172,9 +202,11 @@ def load_trc_file(path):
         dt_raw = _dt.fromtimestamp(ts).isoformat()
     else:
         dt_raw = ''
+    # EXFO .trc does not carry the OTDR model/serial — surfaced as None so the
+    # acquisition sheet shows "not stored in .trc" rather than a wrong value.
     return {'name': name, 'filepath': path,
             'test_dt': dt_raw, 'test_epoch': float(ts) if ts else None,
-            'wl': per_wl}
+            'otdr_model': None, 'otdr_serial': None, 'wl': per_wl}
 
 
 def _event_match_quality(a_events, b_events, pos_tol_m=100.0):
@@ -1071,6 +1103,11 @@ def build_report(files, all_pairs_list, truth_dups, out_path,
         )
 
     generated = datetime.now().strftime('%Y-%m-%d %H:%M')
+    try:
+        acq_block = _acq_html(_acq_records_multiwl(files))
+    except Exception:
+        acq_block = ''
+
     html = f'''<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>{title}</title>
@@ -1114,6 +1151,8 @@ def build_report(files, all_pairs_list, truth_dups, out_path,
 </div>
 
 {dup_detail_block}
+
+{acq_block}
 
 <div class="section-block">
 <div class="dir-banner">5. Closest non-duplicate pairs</div>
@@ -1188,6 +1227,206 @@ def html_to_pdf(html_path, pdf_path):
     with open(pdf_path, 'wb') as fh:
         fh.write(pdf_bytes)
     return True
+
+
+# ===================== Acquisition-parameter consistency =====================
+# Audits that every trace in a set was shot with the same instrument + settings.
+# If all match → that value IS the spec. If not → show the majority and the
+# files that differ. Works for SOR (1 trace/file) and JSON/TRC (1 per wavelength).
+def _consensus(pairs):
+    """pairs: list of (file, value). Returns the majority value + the files that
+    differ. Nulls are treated as 'missing' (and count as differing)."""
+    from collections import Counter
+    total = len(pairs)
+    non_null = [v for _, v in pairs if v not in (None, '')]
+    if not non_null:
+        return {'available': False, 'all_match': True, 'majority': None,
+                'majority_count': 0, 'total': total, 'outliers': []}
+    maj, mc = Counter(non_null).most_common(1)[0]
+    outliers = [(f, v) for f, v in pairs if v != maj]
+    return {'available': True, 'all_match': not outliers, 'majority': maj,
+            'majority_count': mc, 'total': total, 'outliers': outliers}
+
+
+def _consensus_text(con, majority_label='All match'):
+    """(result_string, [outlier_detail_lines]) for a consensus dict."""
+    if not con.get('available'):
+        return ('Not available (not stored in this file type)', [])
+    if con['all_match']:
+        return (f'✓ {majority_label}: {con["majority"]}', [])
+    lines = [f'{f}: {v if v not in (None, "") else "(missing)"}'
+             for f, v in con['outliers']]
+    head = (f'⚠ Majority: {con["majority"]} '
+            f'({con["majority_count"]} of {con["total"]}) — {len(con["outliers"])} differ:')
+    return (head, lines)
+
+
+def _acquisition_consistency(records):
+    """records: per-trace dicts (file, wavelength_nm, otdr_model, otdr_serial,
+    timestamp, pulse_width_ns, averaging). Returns a structured report."""
+    from collections import OrderedDict
+    from datetime import datetime
+    by_file = OrderedDict()
+    for r in records:
+        by_file.setdefault(r['file'], r)
+    files = list(by_file.values())
+
+    file_fields = [
+        ('OTDR model',  _consensus([(r['file'], r.get('otdr_model'))  for r in files])),
+        ('OTDR serial', _consensus([(r['file'], r.get('otdr_serial')) for r in files])),
+    ]
+
+    def _dt(ts):
+        try:
+            return datetime.fromtimestamp(float(ts))
+        except Exception:
+            return None
+    day_pairs = [(r['file'], (_dt(r.get('timestamp')).strftime('%Y-%m-%d')
+                              if _dt(r.get('timestamp')) else None)) for r in files]
+    ts_con = _consensus(day_pairs)
+    dts = [d for d in (_dt(r.get('timestamp')) for r in files) if d]
+    timestamp = {**ts_con,
+                 'span_start': (min(dts).strftime('%Y-%m-%d %H:%M') if dts else None),
+                 'span_end':   (max(dts).strftime('%Y-%m-%d %H:%M') if dts else None)}
+
+    def _w(r):
+        return round(float(r['wavelength_nm']), 1) if r.get('wavelength_nm') is not None else None
+    wl_by_file = OrderedDict()
+    for r in records:
+        wl_by_file.setdefault(r['file'], set()).add(_w(r))
+    wl_pairs = [(f, ', '.join(f'{w:g}' for w in sorted(x for x in s if x is not None)) or '—')
+                for f, s in wl_by_file.items()]
+    wavelengths = _consensus(wl_pairs)
+
+    wl_groups = OrderedDict()
+    for r in records:
+        wl_groups.setdefault(_w(r), []).append(r)
+    per_wl = []
+    for w, rs in sorted(wl_groups.items(), key=lambda kv: (kv[0] is None, kv[0])):
+        pulse = _consensus([(r['file'], None if r.get('pulse_width_ns') is None
+                             else f"{round(r['pulse_width_ns']):g} ns") for r in rs])
+        avg = _consensus([(r['file'], r.get('averaging')) for r in rs])
+        per_wl.append({'wavelength': w, 'n': len(rs), 'pulse': pulse, 'averaging': avg})
+
+    return {'n_files': len(files), 'n_traces': len(records),
+            'file_fields': file_fields, 'timestamp': timestamp,
+            'wavelengths': wavelengths, 'per_wl': per_wl}
+
+
+def _acq_records_multiwl(files):
+    recs = []
+    for f in files:
+        for wl, rec in (f.get('wl') or {}).items():
+            recs.append({'file': f['name'], 'wavelength_nm': wl,
+                         'otdr_model': f.get('otdr_model'),
+                         'otdr_serial': f.get('otdr_serial'),
+                         'timestamp': f.get('test_epoch'),
+                         'pulse_width_ns': rec.get('pulse_width_ns'),
+                         'averaging': rec.get('averaging')})
+    return recs
+
+
+def _write_acq_sheet(wb, records):
+    """Add an 'Acquisition parameters' sheet to an openpyxl workbook."""
+    from openpyxl.styles import Font, PatternFill
+    rep = _acquisition_consistency(records)
+    ws = wb.create_sheet('Acquisition parameters')
+    TITLE = Font(name='Calibri', size=14, bold=True)
+    BOLD  = Font(name='Calibri', size=12, bold=True)
+    BASE  = Font(name='Calibri', size=12)
+    GOOD  = Font(name='Calibri', size=12, color='2D8F48')
+    WARN  = Font(name='Calibri', size=12, color='B97000', bold=True)
+    NA    = Font(name='Calibri', size=12, color='888888', italic=True)
+    HDR   = Font(name='Calibri', size=12, bold=True, color='FFFFFF')
+    ws['A1'] = 'Acquisition parameters'; ws['A1'].font = TITLE
+    ws['A2'] = f"{rep['n_files']} files · {rep['n_traces']} traces"; ws['A2'].font = BASE
+    r = 4
+    for c, h in enumerate(('Parameter', 'Result'), 1):
+        cell = ws.cell(row=r, column=c, value=h)
+        cell.fill = PatternFill('solid', fgColor='1F3864'); cell.font = HDR
+    r += 1
+
+    def emit(param, con, mlabel='All match'):
+        nonlocal r
+        text, lines = _consensus_text(con, majority_label=mlabel)
+        ws.cell(row=r, column=1, value=param).font = BOLD
+        rc = ws.cell(row=r, column=2, value=text)
+        rc.font = (NA if not con.get('available')
+                   else GOOD if con.get('all_match') else WARN)
+        r += 1
+        for ln in lines:
+            ws.cell(row=r, column=2, value='   • ' + ln).font = BASE
+            r += 1
+
+    for label, con in rep['file_fields']:
+        emit(label, con)
+    ts = rep['timestamp']
+    ws.cell(row=r, column=1, value='Test date').font = BOLD
+    if ts.get('all_match') and ts.get('available'):
+        c = ws.cell(row=r, column=2,
+                    value=f"✓ All shot {ts['majority']}  (span {ts['span_start']} → {ts['span_end']})")
+        c.font = GOOD; r += 1
+    else:
+        c = ws.cell(row=r, column=2,
+                    value=f"⚠ Majority day {ts['majority']} ({ts['majority_count']} of {ts['total']}); "
+                          f"span {ts['span_start']} → {ts['span_end']}")
+        c.font = WARN; r += 1
+        for f, v in ts['outliers']:
+            ws.cell(row=r, column=2, value=f"   • {f}: {v}").font = BASE; r += 1
+    emit('Wavelengths', rep['wavelengths'])
+    if rep['per_wl']:
+        ws.cell(row=r, column=1, value='— per wavelength —').font = BOLD; r += 1
+        for pw in rep['per_wl']:
+            wl = pw['wavelength']; tag = (f'{wl:g} nm' if wl is not None else '?')
+            emit(f'{tag} — Pulse width', pw['pulse'])
+            emit(f'{tag} — Averaging', pw['averaging'])
+    ws.column_dimensions['A'].width = 28
+    ws.column_dimensions['B'].width = 90
+
+
+def _acq_html(records):
+    """Return an HTML section block (acquisition parameters) for the PDF."""
+    rep = _acquisition_consistency(records)
+
+    def _row(param, con):
+        text, lines = _consensus_text(con)
+        if not con.get('available'):
+            color = '#888'
+        elif con.get('all_match'):
+            color = '#2d8f48'
+        else:
+            color = '#b97000'
+        detail = ('<ul style="margin:4px 0 0 0">' +
+                  ''.join(f'<li>{l}</li>' for l in lines) + '</ul>') if lines else ''
+        return (f'<tr><td style="text-align:left;font-weight:600">{param}</td>'
+                f'<td style="color:{color}">{text}{detail}</td></tr>')
+
+    rows = [_row(label, con) for label, con in rep['file_fields']]
+    ts = rep['timestamp']
+    if ts.get('all_match') and ts.get('available'):
+        rows.append(f'<tr><td style="text-align:left;font-weight:600">Test date</td>'
+                    f'<td style="color:#2d8f48">✓ All shot {ts["majority"]} '
+                    f'(span {ts["span_start"]} → {ts["span_end"]})</td></tr>')
+    else:
+        ol = '<ul style="margin:4px 0 0 0">' + ''.join(
+            f'<li>{f}: {v}</li>' for f, v in ts['outliers']) + '</ul>'
+        rows.append(f'<tr><td style="text-align:left;font-weight:600">Test date</td>'
+                    f'<td style="color:#b97000">⚠ Majority day {ts["majority"]} '
+                    f'({ts["majority_count"]} of {ts["total"]}); span {ts["span_start"]} '
+                    f'→ {ts["span_end"]}{ol}</td></tr>')
+    rows.append(_row('Wavelengths', rep['wavelengths']))
+    for pw in rep['per_wl']:
+        wl = pw['wavelength']; tag = (f'{wl:g} nm' if wl is not None else '?')
+        rows.append(_row(f'{tag} — Pulse width', pw['pulse']))
+        rows.append(_row(f'{tag} — Averaging', pw['averaging']))
+    return (
+        '<div class="section-block">'
+        f'<div class="dir-banner">Acquisition parameters — {rep["n_files"]} files '
+        f'· {rep["n_traces"]} traces</div>'
+        '<table class="vote-table">'
+        '<tr><th style="text-align:left">Parameter</th>'
+        '<th style="text-align:left">Result</th></tr>'
+        + ''.join(rows) + '</table></div>')
 
 
 def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
@@ -1455,6 +1694,11 @@ def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
             ws.add_image(img2, 'A70')
     except Exception as exc:
         print(f'  warn: skipped Charts sheet ({exc})')
+
+    try:
+        _write_acq_sheet(wb, _acq_records_multiwl(files))
+    except Exception as exc:
+        print(f'  warn: skipped Acquisition parameters sheet ({exc})')
 
     wb.save(out_xlsx)
     print(f'XLSX: {out_xlsx}')
