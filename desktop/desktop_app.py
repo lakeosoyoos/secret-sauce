@@ -14,6 +14,7 @@ import sys
 import glob
 import shutil
 import tempfile
+import zipfile
 from collections import defaultdict
 
 import streamlit as st
@@ -109,28 +110,82 @@ def _is_otdr_json(path):
         return False
 
 
-# ----- inventory (recursive) --------------------------------------------
+def _extract_zips_in(folder):
+    """Find .zip files anywhere under `folder`, extract their .sor/.trc/.json into
+    a temp dir (one subfolder per zip so same-named files can't collide), and
+    return (extract_dir or None, n_zips). Cached in st.session_state so a big zip
+    isn't re-extracted on every Streamlit rerun — it re-extracts only when the set
+    of zips (path/size/mtime) changes. Lets a tech point at a folder of zipped
+    acquisitions (or drop the zips straight in) and just run."""
+    zips = []
+    for root, _d, files in os.walk(folder):
+        for f in files:
+            if f.lower().endswith(".zip"):
+                zips.append(os.path.join(root, f))
+    if not zips:
+        old = st.session_state.pop("_zip_dir", None)
+        if old:
+            shutil.rmtree(old, ignore_errors=True)
+        st.session_state.pop("_zip_sig", None)
+        return None, 0
+    sig = tuple(sorted((z, os.path.getsize(z), int(os.path.getmtime(z)))
+                       for z in zips))
+    if st.session_state.get("_zip_sig") == sig and st.session_state.get("_zip_dir"):
+        return st.session_state["_zip_dir"], len(zips)
+    old = st.session_state.get("_zip_dir")
+    if old:
+        shutil.rmtree(old, ignore_errors=True)
+    dest = tempfile.mkdtemp(prefix="ss_zip_")
+    for z in zips:
+        sub = os.path.join(dest, os.path.splitext(os.path.basename(z))[0])
+        os.makedirs(sub, exist_ok=True)
+        try:
+            with zipfile.ZipFile(z) as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    inner = os.path.basename(info.filename)
+                    low = inner.lower()
+                    if (not inner or inner.startswith("._") or inner == ".DS_Store"
+                            or not low.endswith((".sor", ".trc", ".json"))):
+                        continue
+                    with zf.open(info) as src, \
+                            open(os.path.join(sub, inner), "wb") as out:
+                        out.write(src.read())
+        except Exception as exc:
+            st.warning(f"⚠️ Could not read {os.path.basename(z)}: {exc}")
+    st.session_state["_zip_sig"] = sig
+    st.session_state["_zip_dir"] = dest
+    return dest, len(zips)
+
+
+# ----- inventory (recursive, incl. any .zip archives in the folder) ------
+# Any .zip in the chosen folder is extracted and its .sor/.trc/.json included.
 # Non-trace .json files (results/config exports) are ignored so they can't trip
 # the one-type-per-run guard below. SOR/TRC are bucketed by extension (stray
 # files with those OTDR-specific extensions don't occur in the field).
+zip_dir, n_zips = _extract_zips_in(folder)
+roots = [folder] + ([zip_dir] if zip_dir else [])
 sor_files, trc_files, json_files = [], [], []
 skipped_json = 0
-for root, _dirs, files in os.walk(folder):
-    for f in files:
-        low = f.lower()
-        full = os.path.join(root, f)
-        if low.endswith(".sor"):
-            sor_files.append(full)
-        elif low.endswith(".trc"):
-            trc_files.append(full)
-        elif low.endswith(".json"):
-            if _is_otdr_json(full):
-                json_files.append(full)
-            else:
-                skipped_json += 1   # stray results/config json — not a trace
+for base in roots:
+    for root, _dirs, files in os.walk(base):
+        for f in files:
+            low = f.lower()
+            full = os.path.join(root, f)
+            if low.endswith(".sor"):
+                sor_files.append(full)
+            elif low.endswith(".trc"):
+                trc_files.append(full)
+            elif low.endswith(".json"):
+                if _is_otdr_json(full):
+                    json_files.append(full)
+                else:
+                    skipped_json += 1   # stray results/config json — not a trace
 
 st.success(f"Found **{len(sor_files)} SOR** · **{len(trc_files)} TRC** · "
-           f"**{len(json_files)} JSON** in this folder (and subfolders).")
+           f"**{len(json_files)} JSON** in this folder (and subfolders)"
+           + (f", including **{n_zips} zip archive(s)**." if n_zips else "."))
 if skipped_json:
     st.caption(f"ℹ️ Ignored {skipped_json} non-trace .json file"
                f"{'s' if skipped_json != 1 else ''} (e.g. a results or config "
