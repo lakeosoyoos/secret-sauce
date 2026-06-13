@@ -926,6 +926,8 @@ def build_report_sor(folder, title, out_pdf):
 <h1>{title}</h1>
 <div class="subtitle">{len(files)} files &bull; {len(pairs)} pairs &bull; generated {generated}</div>
 
+{acq_block}
+
 <div class="section-block">
 <div class="dir-banner">1. Distribution</div>
 <img src="data:image/png;base64,{dist_chart}" class="chart-img" />
@@ -956,8 +958,6 @@ def build_report_sor(folder, title, out_pdf):
 </div>
 
 {dup_detail_block}
-
-{acq_block}
 
 <div class="section-block">
 <div class="dir-banner">4. Top 30 pairs — lowest level of disagreement</div>

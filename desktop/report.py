@@ -1116,6 +1116,8 @@ def build_report(files, all_pairs_list, truth_dups, out_path,
 <h1>{title}</h1>
 <div class="subtitle">{len(files)} files &bull; {len(all_pairs_list)} pairs &bull; generated {generated}</div>
 
+{acq_block}
+
 {verdict_block}
 
 <div class="cards">
@@ -1151,8 +1153,6 @@ def build_report(files, all_pairs_list, truth_dups, out_path,
 </div>
 
 {dup_detail_block}
-
-{acq_block}
 
 <div class="section-block">
 <div class="dir-banner">5. Closest non-duplicate pairs</div>
@@ -1330,7 +1330,11 @@ def _write_acq_sheet(wb, records):
     """Add an 'Acquisition parameters' sheet to an openpyxl workbook."""
     from openpyxl.styles import Font, PatternFill
     rep = _acquisition_consistency(records)
-    ws = wb.create_sheet('Acquisition parameters')
+    ws = wb.create_sheet('Acquisition parameters', 0)   # first tab
+    try:
+        wb.active = wb.index(ws)                          # open on it
+    except Exception:
+        pass
     TITLE = Font(name='Calibri', size=14, bold=True)
     BOLD  = Font(name='Calibri', size=12, bold=True)
     BASE  = Font(name='Calibri', size=12)
