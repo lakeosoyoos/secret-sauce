@@ -56,6 +56,18 @@ jobs:
         run: python test_filenames.py
         shell: cmd
 
+      # End-to-end + edge-case test suite. Drives the real engines and the
+      # Streamlit "Run analysis" flow against tiny committed fixtures, so an
+      # engine or UI regression fails HERE — in seconds — before the multi-
+      # minute PyInstaller build and long before the Release publishes.
+      # PYTHONIOENCODING=utf-8: Windows defaults to cp1252, which crashes when
+      # a test name or assertion message contains a non-ASCII character.
+      - name: Run desktop test suite (must pass, or fail the build)
+        run: python -m pytest tests -v
+        shell: cmd
+        env:
+          PYTHONIOENCODING: utf-8
+
       - name: Build SecretSauce.exe
         run: pyinstaller SecretSauce.spec --noconfirm --clean
         shell: cmd

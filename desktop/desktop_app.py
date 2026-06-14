@@ -239,7 +239,12 @@ def _out_dir():
 
 
 # ----- run --------------------------------------------------------------
-if st.button("Run analysis", type="primary"):
+# Test hook: the e2e suite drives the full flow headlessly by setting the
+# session flag below (see desktop/tests). It is a no-op in production — the flag
+# is never set by any UI element, so behaviour for a real user is unchanged.
+run_clicked = st.button("Run analysis", type="primary") or \
+    st.session_state.get("__test_force_run__", False)
+if run_clicked:
     out_dir = _out_dir()
     written = []
 

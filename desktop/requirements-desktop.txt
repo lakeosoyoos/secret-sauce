@@ -27,6 +27,10 @@ scipy
 matplotlib
 openpyxl
 pyinstaller
+# Build/test-only: pytest runs the desktop test suite (desktop/tests/) in CI
+# BEFORE the .exe is built, so an engine/UI regression fails in seconds instead
+# of after a multi-minute PyInstaller build. Not imported by the shipped app.
+pytest
 # Note: weasyprint is intentionally NOT listed — the desktop build is Excel-
 # first and excludes it (see SecretSauce.spec). PDF still works if Chrome is
 # installed on the machine.
