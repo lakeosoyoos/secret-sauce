@@ -19,7 +19,8 @@ import webbrowser
 # time. Fetching them fresh on each launch means a code update goes live on
 # every tech's machine on their NEXT launch, with no re-download of the app.
 # If the machine is offline, we silently fall back to the bundled copies.
-_REPO_RAW = "https://raw.githubusercontent.com/lakeosoyoos/secret-sauce/main"
+_REPO = "lakeosoyoos/secret-sauce"
+_REPO_RAW = "https://raw.githubusercontent.com/" + _REPO   # + /<sha>/<path>
 _LIVE_FILES = {
     # local cache name      : path in the repo
     "report.py":            "report.py",
@@ -28,6 +29,72 @@ _LIVE_FILES = {
     "trc_parser.py":        "trc_parser.py",
     "desktop_app.py":       "desktop/desktop_app.py",
 }
+# Per-file sentinel: a symbol each file MUST contain. Replaces a bare b"def "
+# so a captive-portal HTML page, a truncated download, or a wrong-branch file
+# can't masquerade as our code.
+_SENTINELS = {
+    "report.py":            b"def run_json_xlsx_bytes",
+    "report_sor.py":        b"def run_sor_xlsx_bytes",
+    "sor_reader324802a.py": b"def parse_sor_full",
+    "trc_parser.py":        b"def parse_trc_file",
+    "desktop_app.py":       b"def _is_otdr_json",
+}
+
+
+def _ss_root():
+    return os.path.join(os.path.expanduser("~"), ".secretsauce")
+
+
+def _pointer_path():
+    return os.path.join(_ss_root(), "current")
+
+
+def _current_pointer():
+    """Path to the last engine dir that PASSED validation, or None. The pointer
+    is flipped atomically only after a candidate passes the fixture smoke check,
+    so whatever it points at is known-good."""
+    try:
+        with open(_pointer_path()) as f:
+            d = f.read().strip()
+        return d if d and os.path.exists(os.path.join(d, "desktop_app.py")) else None
+    except Exception:
+        return None
+
+
+def _set_current_pointer(path):
+    """Atomically point 'current' at a validated engine dir (temp + os.replace —
+    one rename, atomic on POSIX and Windows, so a crash can't leave a half-
+    written pointer or a mixed-version engine)."""
+    p = _pointer_path()
+    tmp = p + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(path)
+    os.replace(tmp, p)
+
+
+def _cleanup_old_engines(keep):
+    """Remove stale engine-<sha> dirs, keeping only the validated current one."""
+    try:
+        root = _ss_root()
+        for name in os.listdir(root):
+            d = os.path.join(root, name)
+            if name.startswith("engine-") and d != keep and os.path.isdir(d):
+                shutil.rmtree(d, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _resolve_head_sha():
+    """main's current HEAD commit SHA, so every file is fetched from ONE
+    consistent snapshot (no cross-commit skew mid-fetch)."""
+    import urllib.request
+    import json as _json
+    api = "https://api.github.com/repos/" + _REPO + "/commits/main"
+    req = urllib.request.Request(api, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "SecretSauce-updater"})
+    with urllib.request.urlopen(req, timeout=8) as r:
+        return _json.loads(r.read().decode())["sha"]
 
 
 def _smoke_check_engine(folder):
@@ -41,43 +108,67 @@ def _smoke_check_engine(folder):
     import subprocess
     env = dict(os.environ, SS_SMOKE_CHECK=folder)
     try:
+        # 60s cap: the check (import + fixture analyze + AppTest, AppTest itself
+        # capped at 30s) normally runs in ~5-10s; 60s leaves comfortable margin
+        # under the boot self-test's launch window even on a slow field laptop.
         r = subprocess.run([sys.executable], env=env,
-                           capture_output=True, timeout=90)
+                           capture_output=True, timeout=60)
         return r.returncode == 0
     except Exception:
         return False
 
 
 def _fetch_latest_code():
-    """Download the live engine+UI into a cache dir and validate it before use.
-    All-or-nothing: only swap in the cache if EVERY file downloaded, COMPILES
-    (no syntax errors), and the engine IMPORTS cleanly. On any failure return
-    None so we fall back to the bundled copies. Returns the cache dir or None."""
+    """Fetch + validate + ATOMICALLY publish the live engine/UI, pinned to one
+    commit. Returns the validated engine dir, or None (caller then falls back to
+    the last validated cache, then to the bundled copies).
+
+    Hardened vs the old 'compiles + imports' gate:
+      * one HEAD SHA -> every file from the SAME commit (no mid-fetch skew)
+      * per-file sentinel (not a bare 'def ') so an error page can't pass
+      * the smoke check RUNS the engine on a bundled fixture and asserts a known
+        verdict AND runs the UI (desktop_app.py) — so a push that imports fine
+        but breaks the verdict or the UI is rejected, not shipped
+      * validated IN PLACE (the exact dir that will run), published by an atomic
+        pointer flip — never a file-by-file copy into a live dir."""
     import urllib.request
+    try:
+        sha = _resolve_head_sha()
+    except Exception as e:
+        print("[launcher] could not resolve HEAD (offline/rate-limited): %r" % e)
+        return None
+    base = "%s/%s" % (_REPO_RAW, sha)
+    cand = os.path.join(_ss_root(), "engine-" + sha[:12])
+    # Already published + validated this exact commit? reuse, skip the re-fetch.
+    if _current_pointer() == cand:
+        return cand
     staging = tempfile.mkdtemp(prefix="ss_fetch_")
     try:
         for local_name, repo_path in _LIVE_FILES.items():
-            with urllib.request.urlopen(f"{_REPO_RAW}/{repo_path}",
-                                        timeout=8) as resp:
+            with urllib.request.urlopen("%s/%s" % (base, repo_path), timeout=8) as resp:
                 data = resp.read()
-            # sanity: non-empty and looks like our python (guards against an
-            # error page / truncated download being treated as code)
-            if not data or b"def " not in data:
-                raise ValueError(f"unexpected content for {repo_path}")
-            # syntax check — catches the most common "bad push breaks everyone"
-            compile(data, local_name, "exec")
+            if not data or _SENTINELS.get(local_name, b"def ") not in data:
+                raise ValueError("unexpected content for " + repo_path)
+            compile(data, local_name, "exec")     # syntax gate
             with open(os.path.join(staging, local_name), "wb") as fh:
                 fh.write(data)
-        # import smoke check — confirms the fetched engine actually loads
-        if not _smoke_check_engine(staging):
-            raise RuntimeError("fetched engine failed import smoke check")
-        cache = os.path.join(os.path.expanduser("~"), ".secretsauce", "engine")
-        os.makedirs(cache, exist_ok=True)
-        for local_name in _LIVE_FILES:
-            shutil.copy(os.path.join(staging, local_name),
-                        os.path.join(cache, local_name))
-        return cache
-    except Exception:
+        os.makedirs(_ss_root(), exist_ok=True)
+        shutil.rmtree(cand, ignore_errors=True)
+        shutil.copytree(staging, cand)
+        # Validate the FINAL dir (validated bytes == executed bytes), running the
+        # fixture verdict + UI smoke check. Only flip the pointer if it passes.
+        if not _smoke_check_engine(cand):
+            shutil.rmtree(cand, ignore_errors=True)
+            print("[launcher] candidate engine failed smoke check; keeping last-good")
+            return None
+        _set_current_pointer(cand)
+        _cleanup_old_engines(keep=cand)
+        return cand
+    except (OSError, PermissionError) as e:
+        print("[launcher] update I/O error (locked dir / disk full?): %r" % e)
+        return None
+    except Exception as e:
+        print("[launcher] update fetch failed: %r" % e)
         return None
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -150,9 +241,16 @@ def _open_browser():
 
 
 def _smoke_check_mode():
-    """If launched with SS_SMOKE_CHECK=<dir>, this is the isolated subprocess
-    from _smoke_check_engine — just try to import the engine from <dir> and
-    exit 0 (ok) or 1 (broken). Must run before any normal startup work."""
+    """The isolated subprocess from _smoke_check_engine (SS_SMOKE_CHECK=<dir>).
+    Validates the candidate engine in <dir> three ways, then exits 0 (good) or
+    non-zero (rejected -> launcher keeps the last-good engine, never ships this):
+      1. the engine modules import;
+      2. the engine RUN on a tiny bundled fixture still calls the known re-shoot
+         a duplicate (a push that inverts a threshold imports fine but fails HERE
+         — the wrong-verdict failure that a 'compiles + imports' gate misses);
+      3. the UI (desktop_app.py) imports + runs through Streamlit AppTest (a plain
+         import can't validate it — it runs Streamlit at module top).
+    Must run before any normal startup work."""
     folder = os.environ.get("SS_SMOKE_CHECK")
     if not folder:
         return False
@@ -161,6 +259,28 @@ def _smoke_check_mode():
         import importlib
         for mod in ("sor_reader324802a", "trc_parser", "report", "report_sor"):
             importlib.import_module(mod)
+        # 2. verdict gate on the bundled fixture (skip only if it isn't bundled)
+        fixture = os.path.join(_base_dir(), "_smoke_fixture")
+        if os.path.isdir(fixture):
+            rsor = importlib.import_module("report_sor")
+            a = rsor._analyze_sor(fixture)
+            if not any(p.get("p_dup", 0) > 0.5
+                       and {p.get("a"), p.get("b")}
+                       == {"TUCROM453_1550", "TUCROM454_1550"}
+                       for p in a["pairs"]):
+                os._exit(2)
+        # 3. UI gate — best-effort: an AppTest hiccup must never REJECT an
+        # otherwise-good engine (compile() already gated syntax), so only a
+        # CONFIRMED desktop_app exception fails it.
+        try:
+            from streamlit.testing.v1 import AppTest
+            at = AppTest.from_file(os.path.join(folder, "desktop_app.py"),
+                                   default_timeout=30)
+            at.run()
+            if len(at.exception) > 0:
+                os._exit(3)
+        except Exception:
+            pass
         os._exit(0)
     except Exception:
         os._exit(1)
@@ -193,19 +313,26 @@ def main():
 
     _silence_first_run_prompt()
 
-    # Pull the latest code; use it if the fetch fully succeeded, else the
-    # bundled copies. The cached desktop_app.py does sys.path.insert(0, HERE),
-    # so its imports resolve to the freshly-fetched engine in the same dir.
+    # Pull the latest code (atomically published ONLY if it passed the fixture
+    # smoke check). If offline / fetch fails, fall back to the last VALIDATED
+    # cache; only if there's none do we use the bundled copies. The chosen
+    # desktop_app.py does sys.path.insert(0, HERE), so its imports resolve to the
+    # engine in the same dir.
     cache = _fetch_latest_code()
+    if cache:
+        source = "latest (auto-updated from the cloud)"
+    else:
+        cache = _current_pointer()
+        source = "cached (last validated update)" if cache else None
     if cache and os.path.exists(os.path.join(cache, "desktop_app.py")):
         script = os.path.join(cache, "desktop_app.py")
         os.environ["PYTHONPATH"] = cache + os.pathsep + os.environ.get("PYTHONPATH", "")
-        os.environ["SS_ENGINE_SOURCE"] = "latest (auto-updated from the cloud)"
-        print(f"[launcher] using auto-updated code from {cache}")
+        os.environ["SS_ENGINE_SOURCE"] = source
+        print("[launcher] using engine from %s (%s)" % (cache, source))
     else:
         script = os.path.join(_base_dir(), "desktop_app.py")
         os.environ["SS_ENGINE_SOURCE"] = "bundled (offline — using the built-in version)"
-        print("[launcher] offline or fetch failed; using bundled code")
+        print("[launcher] offline / no validated cache; using bundled code")
 
     threading.Thread(target=_open_browser, daemon=True).start()
 

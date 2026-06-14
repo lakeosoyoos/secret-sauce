@@ -29,6 +29,13 @@ datas += [
     ("trc_parser.py", "."),
     ("zerodblogo.png", "."),
 ]
+
+# Tiny SOR fixture (the TUCROM453~454 re-shoot pair + a few distinct fibers) used
+# by the launcher's auto-update smoke check: it RUNS the freshly-fetched engine on
+# this fixture and asserts the known dup is still found, so a push that imports
+# cleanly but breaks the verdict is rejected before it ever reaches a tech.
+import glob as _glob
+datas += [(f, "_smoke_fixture") for f in _glob.glob("tests/fixtures/sor/*.sor")]
 hiddenimports += ["report", "report_sor", "sor_reader324802a", "trc_parser",
                   "tkinter", "tkinter.filedialog"]
 
