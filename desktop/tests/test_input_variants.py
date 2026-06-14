@@ -248,14 +248,17 @@ def test_windows_backslash_zip_entries_extract(tmp_path):
         for f in sor:
             zf.writestr("job1\\" + os.path.basename(f), open(f, "rb").read())
 
-    # Sanity: the entries really do carry backslashes (so the test exercises the
-    # quirk, not a silently-normalised name).
+    # The quirk only exists where the host zip layer keeps the literal backslash
+    # (macOS/Linux). On Windows, zipfile normalises '\\' -> '/' on read AND
+    # os.path.basename treats '\\' as a separator, so the Windows-built-zip quirk
+    # cannot be reproduced there — skip rather than fail on a fixture the platform
+    # won't let us build.
     with zipfile.ZipFile(zip_path) as zf:
         names = [i.filename for i in zf.infolist()]
-    assert any("\\" in n for n in names), (
-        "test setup failed: zip entries were normalised, no backslash present: "
-        + repr(names)
-    )
+    if not any("\\" in n for n in names):
+        import pytest
+        pytest.skip("host zip layer normalised backslash separators; "
+                    "the Windows-built-zip quirk is not reproducible here")
 
     at = _drive_run(str(holder))
     _assert_clean_run(at)
