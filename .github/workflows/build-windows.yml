@@ -47,6 +47,15 @@ jobs:
           python -m pip install "setuptools==65.5.1"
         shell: cmd
 
+      # Filename -> fiber-number regression sweep. Locks in the four EXFO
+      # filename bug patterns (trailing space, multi-λ suffix, AppleDouble
+      # sidecars, multi-cable collisions) hardened in _extract_fiber_num — a
+      # regression here fails the build BEFORE the Release publishes. See the
+      # sibling fix in splice-report (commit 05eabe2).
+      - name: Filename regression sweep (must pass, or fail the build)
+        run: python test_filenames.py
+        shell: cmd
+
       - name: Build SecretSauce.exe
         run: pyinstaller SecretSauce.spec --noconfirm --clean
         shell: cmd

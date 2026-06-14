@@ -25,6 +25,7 @@ from report import (  # reuse helpers — all neutral
     _COLOR_HIGH, _COLOR_MID, _COLOR_LOW,
     _event_match_quality, _events_agree,
     _write_acq_sheet, _acq_html, _pair_confidence,
+    _extract_fiber_num, _otdr_paths, _warn_name_collisions,
 )
 
 
@@ -425,13 +426,14 @@ def _analyze_sor(folder):
     physical-reality filters, pick best partners. Returns a dict the
     PDF and XLSX renderers can both consume.
     """
-    paths = sorted(glob.glob(os.path.join(folder, '*.sor')))
+    paths = _otdr_paths(folder, '*.sor')
     files = []
     for p in paths:
         try:
             files.append(load_sor_file(p))
         except Exception as e:
             print(f'  skip {os.path.basename(p)}: {e}')
+    files = _warn_name_collisions(files)
     if len(files) < 2:
         raise RuntimeError(f'Not enough usable .sor files in {folder}')
     print(f'Loaded {len(files)} .sor files from {folder}')
@@ -1160,7 +1162,7 @@ def build_xlsx_sor(folder, title, out_xlsx):
     # the call is the tech's. Listed here so a tech can verify each one.
     import re as _re
     def _port(nm):
-        m = _re.search(r'(\d+)', nm); return int(m.group(1)) if m else None
+        return _extract_fiber_num(nm)   # hardened: see 05eabe2 / _extract_fiber_num
     flagged_pairs = sorted([p for p in pairs if p.get('possible_neighbor')],
                            key=lambda q: -(q.get('p_dup') or 0))
     if flagged_pairs:

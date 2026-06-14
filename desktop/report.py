@@ -59,6 +59,52 @@ def _parse_iso_ts(s):
         return s, None
 
 
+def _extract_fiber_num(fn):
+    """Fiber number from an OTDR filename or name string. Hardened against the
+    EXFO filename quirks found in the splice-report filename survey (commit
+    05eabe2): skips macOS AppleDouble sidecars (._*), tolerates a trailing space
+    before the extension, strips one OR MORE concatenated wavelength codes, then
+    takes the rightmost remaining digit run. Returns int, or None for ._* /
+    no-digit / wavelength-only names."""
+    import re
+    if os.path.basename(fn).startswith('._'):
+        return None
+    stem = os.path.splitext(fn)[0].rstrip()
+    stem = re.sub(r'[\s_\-.](?:850|1300|1310|1490|1550|1625)+$', '', stem)
+    m = re.findall(r'\d+', stem)
+    return int(m[-1]) if m else None
+
+
+def _otdr_paths(folder, pattern):
+    """Sorted OTDR files matching `pattern` in `folder`, with macOS AppleDouble
+    sidecars (._* metadata that Mac-extracted zips leave next to real traces)
+    skipped — they aren't traces and crash the parsers. See 05eabe2."""
+    return sorted(p for p in glob.glob(os.path.join(folder, pattern))
+                  if not os.path.basename(p).startswith('._'))
+
+
+def _warn_name_collisions(files):
+    """Drop files whose identifier (f['name']) collides with an earlier one — a
+    multi-cable / duplicate upload where two files map to the same fiber id and
+    the second would otherwise silently overwrite the first. Keeps the first,
+    surfaces up to 5 WARNs (then '+N more suppressed') so a bad upload is obvious
+    instead of producing a silently-incomplete report. See 05eabe2."""
+    seen, kept, collisions = {}, [], []
+    for f in files:
+        k = f.get('name')
+        if k in seen:
+            collisions.append((k, seen[k].get('filepath'), f.get('filepath')))
+        else:
+            seen[k] = f
+            kept.append(f)
+    for k, a, b in collisions[:5]:
+        print(f"  WARN: duplicate fiber id {k!r} — keeping "
+              f"{os.path.basename(a or '?')}, SKIPPING {os.path.basename(b or '?')}")
+    if len(collisions) > 5:
+        print(f"  WARN: +{len(collisions) - 5} more id collisions suppressed")
+    return kept
+
+
 def _iso_dur_to_s(s):
     """ISO-8601 duration like 'PT15S' or 'PT1M30S' -> seconds (float), else None."""
     import re
@@ -1661,8 +1707,7 @@ def build_xlsx_multiwl(files, all_pairs_list, truth_dups, out_xlsx,
     # min across λ) — i.e. they look like helix/ribbon neighbours, not true dups.
     import re as _re
     def _port(nm):
-        m = _re.search(r'(\d+)', nm)
-        return int(m.group(1)) if m else None
+        return _extract_fiber_num(nm)   # hardened: see 05eabe2 / _extract_fiber_num
     flagged_pairs = sorted([p for p in all_pairs_list if p.get('possible_neighbor')],
                            key=lambda q: -(q.get('p_dup') or 0))
     if flagged_pairs:
@@ -1894,10 +1939,11 @@ def _build_pairs_multiwl(files, wl_list, truth_dups):
 
 
 def build_json_html(folder, title='Duplicate Classification Report', truth_dups=None):
-    paths = sorted(glob.glob(os.path.join(folder, '*.json')))
+    paths = _otdr_paths(folder, '*.json')
     if not paths:
         raise RuntimeError(f'No JSON files found in {folder}')
     files = [load_file(p) for p in paths]
+    files = _warn_name_collisions(files)
     all_pairs, regime = _build_pairs_multiwl(files, WL_ORDER, truth_dups)
     out_html_tmp = os.path.join(folder, '_tmp_report.html')
     build_report(files, all_pairs, truth_dups or set(), out_html_tmp,
@@ -1919,10 +1965,11 @@ def run_json_bytes(folder, title='Duplicate Classification Report', truth_dups=N
 def build_xlsx_json(folder, title, out_xlsx, truth_dups=None):
     """Load JSON files from `folder`, run the multi-λ pipeline, and write an
     Excel workbook to `out_xlsx`. Same analysis as the PDF flow."""
-    paths = sorted(glob.glob(os.path.join(folder, '*.json')))
+    paths = _otdr_paths(folder, '*.json')
     if not paths:
         raise RuntimeError(f'No JSON files found in {folder}')
     files = [load_file(p) for p in paths]
+    files = _warn_name_collisions(files)
     all_pairs, regime = _build_pairs_multiwl(files, WL_ORDER, truth_dups)
     build_xlsx_multiwl(files, all_pairs, truth_dups or set(), out_xlsx,
                        title=title, wl_list=WL_ORDER, regime=regime)
@@ -1945,10 +1992,11 @@ def build_trc_html(folder, title='Duplicate Classification Report', truth_dups=N
     """TRC-mode equivalent of build_json_html. Loads .trc files via the TRC
     parser and reuses the JSON-mode renderer (same multi-wavelength layout)."""
     global WL_ORDER
-    paths = sorted(glob.glob(os.path.join(folder, '*.trc')))
+    paths = _otdr_paths(folder, '*.trc')
     if not paths:
         raise RuntimeError(f'No TRC files found in {folder}')
     files = [load_trc_file(p) for p in paths]
+    files = _warn_name_collisions(files)
     # Use whichever wavelengths the TRC files actually carry — fall back to
     # the production set if everything matches it.
     common = set(files[0]['wl'].keys())
@@ -1983,10 +2031,11 @@ def build_xlsx_trc(folder, title, out_xlsx, truth_dups=None):
     """Load TRC files from `folder`, run the multi-λ pipeline, and write an
     Excel workbook to `out_xlsx`. Uses whichever wavelengths the TRCs
     actually carry (falls back to WL_ORDER if every file matches)."""
-    paths = sorted(glob.glob(os.path.join(folder, '*.trc')))
+    paths = _otdr_paths(folder, '*.trc')
     if not paths:
         raise RuntimeError(f'No TRC files found in {folder}')
     files = [load_trc_file(p) for p in paths]
+    files = _warn_name_collisions(files)
     common = set(files[0]['wl'].keys())
     for f in files[1:]:
         common &= set(f['wl'].keys())
@@ -2022,8 +2071,9 @@ def main():
         tuple(sorted(['VERSLK011','VERSLK017'])), tuple(sorted(['VERSLK012','VERSLK018'])),
     }
 
-    paths = sorted(glob.glob(os.path.join(JSON_FOLDER, '*.json')))
+    paths = _otdr_paths(JSON_FOLDER, '*.json')
     files = [load_file(p) for p in paths]
+    files = _warn_name_collisions(files)
     print(f'Loaded {len(files)} files')
 
     all_pairs = []

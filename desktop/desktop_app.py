@@ -171,6 +171,8 @@ skipped_json = 0
 for base in roots:
     for root, _dirs, files in os.walk(base):
         for f in files:
+            if f.startswith("._"):
+                continue   # macOS AppleDouble sidecar, not a trace (see 05eabe2)
             low = f.lower()
             full = os.path.join(root, f)
             if low.endswith(".sor"):
