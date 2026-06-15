@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Check out repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Python 3.11, NOT 3.12: we pin setuptools==65.5.1 (to avoid the newer
       # setuptools "InvalidVersion" launch crash), but 65.5.1's pkg_resources
@@ -33,7 +33,7 @@ jobs:
       # 'ImpImporter'". 3.11 still has ImpImporter, so 3.11 + setuptools 65.5.1
       # is the combination that actually launches. (Boot self-test enforces it.)
       - name: Set up Python 3.11 (x86-64)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           architecture: "x64"
@@ -141,7 +141,7 @@ jobs:
         shell: cmd
 
       - name: Upload the Windows app as an artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: SecretSauce-Windows
           path: desktop/SecretSauce-Windows.zip
