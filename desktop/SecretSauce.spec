@@ -36,6 +36,12 @@ datas += [
 # cleanly but breaks the verdict is rejected before it ever reaches a tech.
 import glob as _glob
 datas += [(f, "_smoke_fixture") for f in _glob.glob("tests/fixtures/sor/*.sor")]
+
+# Error-report webhook URL, written by CI from the SLACK_ERROR_WEBHOOK secret
+# just before this build (never committed — the repo is public). Bundled only if
+# present, so local builds without the secret simply ship error reporting off.
+if os.path.exists("_webhook.cfg"):
+    datas += [("_webhook.cfg", ".")]
 hiddenimports += ["report", "report_sor", "sor_reader324802a", "trc_parser",
                   "tkinter", "tkinter.filedialog"]
 

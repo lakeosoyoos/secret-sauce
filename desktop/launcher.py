@@ -221,6 +221,40 @@ def _base_dir():
     return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 
 
+def _load_webhook():
+    """Read the build-time error-report webhook (bundled _webhook.cfg, written by
+    CI from the SLACK_ERROR_WEBHOOK secret — never in committed source). Expose
+    it to the engine via SS_ERROR_WEBHOOK. No-op if absent (dev / not configured)."""
+    try:
+        p = os.path.join(_base_dir(), "_webhook.cfg")
+        if os.path.exists(p):
+            with open(p) as f:
+                url = f.read().strip()
+            if url:
+                os.environ["SS_ERROR_WEBHOOK"] = url
+                return url
+    except Exception:
+        pass
+    return None
+
+
+def _post_slack(text):
+    """Fire-and-forget Slack post for LAUNCHER-side failures (the engine has its
+    own report_error for analysis errors). Never raises."""
+    url = os.environ.get("SS_ERROR_WEBHOOK")
+    if not url:
+        return
+    try:
+        import urllib.request
+        import json as _json
+        req = urllib.request.Request(
+            url, data=_json.dumps({"text": text}).encode(),
+            headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=4)
+    except Exception:
+        pass
+
+
 def _open_browser():
     # Wait until the server actually answers before opening the browser.
     # A fixed delay isn't enough: the FIRST cold launch unpacks a few hundred
@@ -304,6 +338,7 @@ def main():
     _smoke_check_mode()
 
     _redirect_output_to_log()
+    _load_webhook()   # expose SS_ERROR_WEBHOOK to the engine + launcher reporting
 
     # If the app is already running (tech double-clicked twice), just open the
     # existing instance instead of starting a dead second server.
@@ -346,7 +381,22 @@ def main():
         "--browser.gatherUsageStats=false",
         "--global.developmentMode=false",
     ]
-    sys.exit(stcli.main())
+    try:
+        sys.exit(stcli.main())
+    except SystemExit:
+        raise
+    except Exception as exc:
+        # The app failed to even START (port bind, import, etc.) — one of the
+        # silent launch failures the audit flagged. Surface it to Slack before
+        # we die, then re-raise so the log keeps the full traceback.
+        import traceback
+        import platform
+        _post_slack(":rotating_light: *Secret Sauce LAUNCH failure* — app did not "
+                    "start\n*%s*: %s\nos: %s  |  engine: %s\n```%s```"
+                    % (type(exc).__name__, exc, platform.platform(),
+                       os.environ.get("SS_ENGINE_SOURCE", "?"),
+                       traceback.format_exc()[-1400:]))
+        raise
 
 
 if __name__ == "__main__":

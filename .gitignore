@@ -21,6 +21,12 @@ venv/
 # Local streamlit secrets
 .streamlit/secrets.toml
 
+# Error-report webhook URL — baked into the .exe at build time from the
+# SLACK_ERROR_WEBHOOK CI secret. NEVER commit it (the repo is public; Slack
+# auto-revokes webhooks found in public source).
+_webhook.cfg
+desktop/_webhook.cfg
+
 # Temp
 *.tmp
 

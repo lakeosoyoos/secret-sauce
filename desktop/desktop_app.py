@@ -316,6 +316,15 @@ if run_clicked:
 
     except Exception as exc:
         st.error(f"Analysis failed: {exc}")
+        # Notify (Slack) so a tech-side failure is visible to us, not just in the
+        # local log. No-op unless a webhook is configured; never sends trace data.
+        try:
+            from report import report_error
+            report_error("desktop analysis run", exc, {
+                "SOR": len(sor_files), "TRC": len(trc_files),
+                "JSON": len(json_files), "format": ext})
+        except Exception:
+            pass
         st.stop()
 
     st.success(f"Done — {len(written)} report(s) written to:")

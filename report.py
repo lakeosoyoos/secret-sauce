@@ -105,6 +105,52 @@ def _warn_name_collisions(files):
     return kept
 
 
+_ERR_LAST = {}   # error signature -> last-sent epoch (in-process hourly dedup)
+
+
+def report_error(where, exc, context=None):
+    """Post a scrubbed tech-side error to the Slack webhook in SS_ERROR_WEBHOOK
+    (set by the launcher from a build-time-only _webhook.cfg — never committed,
+    the repo is public). No-op when unset/offline. NEVER sends fiber/trace data
+    and NEVER raises — error reporting must not break a run. Deduped to one
+    message per error signature per hour so a repeat can't flood the channel."""
+    try:
+        url = os.environ.get("SS_ERROR_WEBHOOK")
+        if not url:
+            return
+        import time, hashlib, traceback, platform
+        sig = hashlib.md5(("%s|%s|%s" % (where, type(exc).__name__, exc)).encode()).hexdigest()
+        now = time.time()
+        if now - _ERR_LAST.get(sig, 0) < 3600:
+            return
+        _ERR_LAST[sig] = now
+        try:
+            import getpass, socket
+            who = "%s / %s" % (socket.gethostname(), getpass.getuser())
+        except Exception:
+            who = "?"
+        ctx = "".join("\n• %s: %s" % (k, v) for k, v in (context or {}).items())
+        text = (":rotating_light: *Secret Sauce error* — %s\n"
+                "*%s*: %s\n"
+                "tech: `%s`  |  os: %s  |  engine: %s%s\n```%s```"
+                % (where, type(exc).__name__, exc, who, platform.platform(),
+                   os.environ.get("SS_ENGINE_SOURCE", "?"), ctx,
+                   traceback.format_exc()[-1400:]))
+        import urllib.request, json as _json, threading
+
+        def _send():
+            try:
+                req = urllib.request.Request(
+                    url, data=_json.dumps({"text": text}).encode(),
+                    headers={"Content-Type": "application/json"})
+                urllib.request.urlopen(req, timeout=4)
+            except Exception:
+                pass
+        threading.Thread(target=_send, daemon=True).start()
+    except Exception:
+        pass
+
+
 def _iso_dur_to_s(s):
     """ISO-8601 duration like 'PT15S' or 'PT1M30S' -> seconds (float), else None."""
     import re
